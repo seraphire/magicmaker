@@ -1,7 +1,7 @@
 <!DOCTYPE html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="/favicon.ico">
-<title>MagicMaker {{SUFFIX}}</title><style>
+<title>{{NAME}} &middot; MagicMaker {{SUFFIX}}</title><style>
 /* Theme: follows the OS by default, overridden by the toggle (which sets
    data-theme on <html> and remembers the choice). */
 :root{
@@ -42,7 +42,9 @@ color:var(--fg);margin:0;padding:1.1em .9em 3em;line-height:1.45;}
 /* Desktop/tablet: stop the page (and the Save button) stretching to the window. */
 .wrap{max-width:44em;margin:0 auto;}
 header{display:flex;align-items:center;gap:.6em;margin-bottom:.2em;}
-h1{font-size:1.25em;color:var(--accentText);margin:0;flex:1;}
+.titles{flex:1;min-width:0;}
+h1{font-size:1.25em;color:var(--accentText);margin:0;word-break:break-word;}
+.sub{color:var(--muted);font-size:.85em;}
 h2{font-size:1em;color:var(--accentText);margin:1.4em 0 .2em;}
 h2:first-child{margin-top:.4em;}
 .logo{width:48px;height:48px;flex:none;}
@@ -106,7 +108,10 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
 </style></head><body><div class="wrap">
 <header>
   <img src="/logo.png" alt="" class="logo">
-  <h1>&#10024; MagicMaker {{SUFFIX}}</h1>
+  <div class="titles">
+    <h1>&#10024; {{NAME}}</h1>
+    <div class="sub">MagicMaker {{SUFFIX}} &middot; <a href="http://{{HOST}}/">{{HOST}}</a></div>
+  </div>
   <button type="button" id="themeBtn" title="Light / dark">&#9681;</button>
 </header>
 
@@ -119,12 +124,6 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
 
 <form method="POST" action="/save" id="cfgform">
   <div class="panel" data-tab="trip">
-    <h2>This device</h2>
-    <label>Device name</label><input name="name" value="{{NAME}}" maxlength="32">
-    <div class="status">Reach this device at
-      <b><a href="http://{{HOST}}/">http://{{HOST}}</a></b><br>
-      <small>The address follows the device name &mdash; rename it above and this
-      changes too (give your computer a moment to notice).</small></div>
     <h2>Countdown</h2>
     <label>Trip date</label><input name="trip" type="date" value="{{DATE}}">
     <label class="chk"><input type="checkbox" name="notrip" id="notrip" {{NOTRIP}}>No trip planned yet</label>
@@ -142,6 +141,11 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
   </div>
 
   <div class="panel" data-tab="adv" hidden>
+    <h2>This device</h2>
+    <label>Device name</label><input name="name" value="{{NAME}}" maxlength="32">
+    <p class="hint">Shown at the top of this page. The web address follows it,
+    so renaming moves the device away from <b>{{HOST}}</b> to match the new name
+    &mdash; give your computer a moment to notice.</p>
     <h2>LED layout</h2>
     <p class="hint">Set these to match how <em>this</em> unit is actually wired &mdash;
     every build differs and the same firmware runs on all of them. Changes apply
