@@ -1,5 +1,6 @@
 {
-  "manifest_url": "https://raw.githubusercontent.com/seraphire/magicmaker/main/manifest.json",
+  "_comment": "MOVED. The live manifest is now on the 'ota' branch - see manifest_url below. This file is only a redirect: devices that still check here adopt the new address on their next update check and never come back. Do not publish releases from this file; edit the copy on the ota branch instead.",
+  "manifest_url": "https://raw.githubusercontent.com/seraphire/magicmaker/ota/manifest.json",
   "firmware": {
     "version": "1.0.4",
     "url": "https://github.com/seraphire/magicmaker/releases/download/v1.0.4/firmware.bin",

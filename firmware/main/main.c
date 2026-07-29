@@ -48,6 +48,7 @@ static volatile bool s_setup_mode    = false;  // came up in SoftAP setup mode -
 static volatile bool s_connecting    = false;  // joining home Wi-Fi -> keep the sparkle going
 static volatile bool s_online_pending = false; // network task -> loop: play the "online" moment
 static bool          s_quiet_boot    = false;  // this boot is a silent (manifest-OTA) reboot
+static bool          s_boot_audio    = true;   // owner's "wake up audibly?" preference
 
 // The assignable sound pool + per-sound animation now live in sounds.c (shared
 // with the web band-manager so the two never drift). These shims keep the rest
@@ -350,7 +351,7 @@ static void network_task(void *arg)
     // Online now (services up), or offline-and-retrying (services deferred until a
     // background reconnect lands).
     bool services_up = (st == NET_ONLINE);
-    if (services_up && !s_quiet_boot) s_online_pending = true;
+    if (services_up && !s_quiet_boot && s_boot_audio) s_online_pending = true;
     bool startup_checked = false;
 
     // Monitor + housekeeping for the long haul (months to the trip). While
@@ -363,7 +364,7 @@ static void network_task(void *arg)
                 appcfg_load(&cfg);
                 online_setup(&cfg);
                 services_up = true;
-                if (!s_quiet_boot) s_online_pending = true;   // play the "online" moment
+                if (!s_quiet_boot && s_boot_audio) s_online_pending = true;  // "online" moment
             }
             if (!startup_checked) {
                 vTaskDelay(pdMS_TO_TICKS(4000));   // let boot/"online" audio settle
@@ -387,6 +388,18 @@ void app_main(void)
     ESP_LOGI(TAG, "=== MagicMaker ===");
 
     store_init();
+
+    // Per-device settings that the drivers need before they start: the physical
+    // LED layout (every build is wired a bit differently, and one OTA image
+    // serves several units), the idle colour, and whether to wake up audibly.
+    {
+        device_config_t c;
+        appcfg_load(&c);
+        leds_set_layout(c.ring_leds, c.mickey_leds, c.ring_first);
+        leds_set_idle_color(c.idle_color);
+        s_boot_audio = c.boot_audio_enabled;
+    }
+
     audio_init();
     leds_init();
     trigger_init();
@@ -451,7 +464,9 @@ void app_main(void)
 #endif
 
 #if PLAY_BOOT_SOUND
-    if (!s_quiet_boot) {
+    // s_quiet_boot suppresses one specific reboot (a self-initiated OTA);
+    // boot_audio_enabled is the owner's standing "wake up quietly" preference.
+    if (!s_quiet_boot && s_boot_audio) {
 #if WIFI_ENABLE
         if (just_updated) {
             audio_play(PROMPT_UPDATE_DONE);             // "all updated!" after a user install

@@ -32,13 +32,40 @@ Option A is what the tooling assumes. For B, create the second repo, copy
 
 | Thing | Where | Why |
 |---|---|---|
-| `firmware.bin` | GitHub **release asset** | build output, doesn't belong in the repo |
-| audio / web assets | the repo, via **raw.githubusercontent.com** | `firmware/spiffs/` is already committed — serve it directly |
-| `manifest.json` | repo root, via raw | tiny, versioned with everything else |
+| `firmware.bin` | GitHub **release asset** on the `v*` tag | build output, doesn't belong in the repo |
+| audio / web assets | `main`, via **raw.githubusercontent.com** | `firmware/spiffs/` is already committed — serve it directly |
+| `manifest.json` | the **`ota` branch**, via raw | it's a deploy switch, not source — see below |
 
 Nothing is duplicated and no firmware change is needed: the device builds asset
-URLs as `base_url + path`, and `raw.githubusercontent.com/<repo>/<branch>/firmware/spiffs/`
+URLs as `base_url + path`, and `raw.githubusercontent.com/<repo>/main/firmware/spiffs/`
 + `cd/cheeky-13.wav` resolves exactly right.
+
+### Why the manifest lives on its own branch
+
+Devices poll `manifest.json` and act on what it says. That makes it a
+**deployment artifact, not source code** — publishing a release and pushing a
+typo fix should not be the same gesture. On `main` they were, and one careless
+merge could have told every unit in the field to install a half-finished build.
+
+So the manifest lives on an **orphan `ota` branch** that contains nothing but
+itself and a README. Publishing is now a separate, deliberate push to a branch
+you never touch by accident. Being an orphan (no shared history with `main`)
+also means git never offers to merge the two.
+
+Note the asymmetry: the manifest *points at* assets on `main`, but doesn't live
+there. `release.ps1` reflects this with two switches — `-Branch` (where assets
+are read from, default `main`) and `-ManifestBranch` (where the manifest is
+published, default `ota`).
+
+Keep both checked out at once with a worktree, so releases never involve
+switching branches:
+
+```
+git worktree add --orphan -b ota ..\MagicMaker-ota      # first time only
+```
+
+`..\MagicMaker-ota` is then a normal directory on the `ota` branch, sitting
+beside the main checkout.
 
 ---
 
@@ -54,29 +81,42 @@ git push -u origin main
 > Check `.gitignore` first — the Audacity project (~100 MB) and the raw takes are
 > already excluded, so only the finished clips go up.
 
-**2. Cut the first release:**
+**2. Create the `ota` branch** (once, in the public checkout):
 
 ```
-tools\release.ps1 -Version 1.0.2 -Repo <you>/<repo>
+git worktree add --orphan -b ota ..\MagicMaker-ota
 ```
 
-It bumps `FW_VERSION`, builds, hashes, and writes `manifest.json` to the repo
-root plus `release\firmware.bin`.
-
-**3. Publish it:**
+**3. Cut the first release:**
 
 ```
-git add -A; git commit -m "release v1.0.2"; git push
-gh release create v1.0.2 release\firmware.bin --title "v1.0.2"
+tools\release.ps1 -Version 1.0.2 -Repo <you>/<repo> -ManifestOut ..\MagicMaker-ota
 ```
+
+It bumps `FW_VERSION`, builds, hashes, and writes `manifest.json` into the `ota`
+worktree plus `release\firmware.bin`.
+
+**4. Publish it — order matters.** The manifest goes **last**, because it is the
+switch that makes everything else live:
+
+```
+git add -A; git commit -m "release v1.0.2"; git push          # 1. assets on main
+gh release create v1.0.2 release\firmware.bin --title "v1.0.2" # 2. the binary
+
+cd ..\MagicMaker-ota                                           # 3. GO LIVE
+git add manifest.json; git commit -m "publish v1.0.2"; git push
+```
+
+Any other order points live devices at a binary or a sound file that hasn't been
+uploaded yet.
 
 (No `gh`? Create the release on the website and drag `release\firmware.bin` in.
 The tag **must** be `v<version>` — that's what the manifest URL points at.)
 
-**4. Point the device at it — once.** Over USB:
+**5. Point the device at it — once.** Over USB:
 
 ```
-update-now https://raw.githubusercontent.com/<you>/<repo>/main/manifest.json
+update-now https://raw.githubusercontent.com/<you>/<repo>/ota/manifest.json
 ```
 
 The manifest names itself in its `manifest_url` field, so the device **saves that
@@ -88,9 +128,12 @@ enter setup mode to change the update URL.
 ## Cutting a release after that
 
 ```
-tools\release.ps1 -Version 1.0.3 -Repo <you>/<repo> -Assets cd/cheeky-13.wav
+tools\release.ps1 -Version 1.0.3 -Repo <you>/<repo> -Assets cd/cheeky-13.wav -ManifestOut ..\MagicMaker-ota
 git add -A; git commit -m "release v1.0.3"; git push
 gh release create v1.0.3 release\firmware.bin --title "v1.0.3"
+git -C ..\MagicMaker-ota add manifest.json
+git -C ..\MagicMaker-ota commit -m "publish v1.0.3"
+git -C ..\MagicMaker-ota push          # <- this is the go-live
 ```
 
 - `-Assets` — only the files that **changed**. Everything unlisted is left alone

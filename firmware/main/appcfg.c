@@ -41,6 +41,11 @@ void appcfg_load(device_config_t *cfg)
     cfg->countdown_enabled = true;
     cfg->idle_led_enabled  = true;
     cfg->countdown_taper   = true;
+    cfg->boot_audio_enabled = true;
+    cfg->idle_color        = 0x000000FF;      // classic blue breathe
+    cfg->ring_leds         = RING_LED_COUNT;  // config.h defaults; per-device in NVS
+    cfg->mickey_leds       = MICKEY_LED_COUNT;
+    cfg->ring_first        = RING_FIRST;
     strncpy(cfg->manifest_url, OTA_MANIFEST_URL, sizeof(cfg->manifest_url) - 1);
     cfg->config_version    = APPCFG_VERSION;
 
@@ -59,6 +64,11 @@ void appcfg_load(device_config_t *cfg)
     cfg->countdown_enabled = get_u8(h, "cd_en", cfg->countdown_enabled);
     cfg->idle_led_enabled  = get_u8(h, "idle_en", cfg->idle_led_enabled);
     cfg->countdown_taper   = get_u8(h, "cd_taper", cfg->countdown_taper);
+    cfg->boot_audio_enabled = get_u8(h, "boot_au", cfg->boot_audio_enabled);
+    cfg->idle_color        = (uint32_t)get_i32(h, "idle_col", (int32_t)cfg->idle_color);
+    cfg->ring_leds         = get_i32(h, "led_ring", cfg->ring_leds);
+    cfg->mickey_leds       = get_i32(h, "led_face", cfg->mickey_leds);
+    cfg->ring_first        = get_u8(h, "led_rf", cfg->ring_first);
     get_str(h, "manif", cfg->manifest_url, sizeof(cfg->manifest_url));
     cfg->config_version    = (uint32_t)get_i32(h, "ver", cfg->config_version);
     nvs_close(h);
@@ -83,6 +93,11 @@ esp_err_t appcfg_save(const device_config_t *cfg)
     nvs_set_u8(h, "cd_en",  cfg->countdown_enabled ? 1 : 0);
     nvs_set_u8(h, "idle_en", cfg->idle_led_enabled ? 1 : 0);
     nvs_set_u8(h, "cd_taper", cfg->countdown_taper ? 1 : 0);
+    nvs_set_u8(h, "boot_au", cfg->boot_audio_enabled ? 1 : 0);
+    nvs_set_i32(h, "idle_col", (int32_t)cfg->idle_color);
+    nvs_set_i32(h, "led_ring", cfg->ring_leds);
+    nvs_set_i32(h, "led_face", cfg->mickey_leds);
+    nvs_set_u8(h, "led_rf", cfg->ring_first ? 1 : 0);
     nvs_set_str(h, "manif", cfg->manifest_url);
     nvs_set_i32(h, "ver", (int32_t)APPCFG_VERSION);
 

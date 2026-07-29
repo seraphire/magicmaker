@@ -34,6 +34,19 @@ typedef struct {
     // keeps it feeling like an event.
     bool countdown_taper;
 
+    // Play the power-on greeting and the "online" chime? Off is for the times
+    // it lives on a desk and you'd rather it woke up quietly.
+    bool boot_audio_enabled;
+
+    // Idle-glow colour, 0x00RRGGBB. Defaults to the classic slow blue breathe.
+    uint32_t idle_color;
+
+    // Physical LED layout, per device - every build is wired slightly
+    // differently and one OTA image serves several units.
+    int  ring_leds;
+    int  mickey_leds;
+    bool ring_first;
+
     char manifest_url[129];  // OTA update manifest (editable only in setup mode)
 
     uint32_t config_version;

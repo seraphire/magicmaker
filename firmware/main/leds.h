@@ -7,6 +7,18 @@
 // ---------------------------------------------------------------------------
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
+
+// Set the physical strip layout BEFORE leds_init(). Every build differs (strand
+// cut to fit, a dead pixel removed) and one OTA image serves several units, so
+// this is a per-device setting rather than a compile-time count. Values are
+// clamped to RING_LED_MAX / MICKEY_LED_MAX, which is what the buffers are sized
+// to. Defaults come from config.h.
+void leds_set_layout(int ring, int mickey, bool ring_first);
+
+// Idle-glow colour as 0x00RRGGBB. Scaled by the same dim ceiling the default
+// blue used, so a bright choice can't glare in a dark room.
+void leds_set_idle_color(uint32_t rgb);
 
 void leds_init(void);
 

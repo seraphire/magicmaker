@@ -11,6 +11,37 @@
 static const char *TAG = "leds";
 static led_strip_handle_t s_strip = NULL;
 
+// Physical layout, per device. Every build differs (strand cut to fit, a dead
+// pixel snipped out), and one OTA image serves several units - so these are
+// runtime settings seeded from the config.h defaults, not compile-time counts.
+// Buffers are sized to the *_MAX ceilings so these can change without a rebuild.
+static int  s_ring       = RING_LED_COUNT;
+static int  s_mickey     = MICKEY_LED_COUNT;
+static int  s_total      = RING_LED_COUNT + MICKEY_LED_COUNT;
+static bool s_ring_first = RING_FIRST;
+
+// Idle-glow colour (0x00RRGGBB), configurable; default the classic blue.
+static uint8_t s_idle_r = 0, s_idle_g = 0, s_idle_b = 255;
+
+void leds_set_layout(int ring, int mickey, bool ring_first)
+{
+    if (ring   < 1) ring   = 1;
+    if (mickey < 0) mickey = 0;
+    if (ring   > RING_LED_MAX)   ring   = RING_LED_MAX;
+    if (mickey > MICKEY_LED_MAX) mickey = MICKEY_LED_MAX;
+    s_ring = ring; s_mickey = mickey; s_total = ring + mickey;
+    s_ring_first = ring_first;
+    ESP_LOGI(TAG, "layout: %d ring + %d face = %d px (%s first)",
+             s_ring, s_mickey, s_total, s_ring_first ? "ring" : "face");
+}
+
+void leds_set_idle_color(uint32_t rgb)
+{
+    s_idle_r = (rgb >> 16) & 0xFF;
+    s_idle_g = (rgb >> 8)  & 0xFF;
+    s_idle_b =  rgb        & 0xFF;
+}
+
 // Frame counters advanced once per *_step() call (~50 fps from the main loop).
 static uint32_t s_reward_frame = 0;
 static uint32_t s_idle_frame   = 0;
@@ -38,20 +69,12 @@ static bool anim_wait(int ms)
 // ---------------------------------------------------------------------------
 static inline int ring_px(int i)
 {
-#if RING_FIRST
-    return i;                               // ring is [0 .. RING_LED_COUNT)
-#else
-    return MICKEY_LED_COUNT + i;            // Mickey first, then ring
-#endif
+    return s_ring_first ? i : s_mickey + i;
 }
 
 static inline int mickey_px(int i)
 {
-#if RING_FIRST
-    return RING_LED_COUNT + i;              // ring first, then Mickey
-#else
-    return i;                               // Mickey is [0 .. MICKEY_LED_COUNT)
-#endif
+    return s_ring_first ? s_ring + i : i;
 }
 
 // Scale a 0-255 channel by the global brightness ceiling.
@@ -61,7 +84,7 @@ void leds_init(void)
 {
     led_strip_config_t strip_config = {
         .strip_gpio_num = NEOPIXEL_GPIO,
-        .max_leds       = TOTAL_LED_COUNT,
+        .max_leds       = TOTAL_LED_MAX,
     };
     led_strip_rmt_config_t rmt_config = {
         .resolution_hz = 10 * 1000 * 1000,   // 10 MHz, same as the radio project
@@ -70,7 +93,7 @@ void leds_init(void)
     ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip));
     led_strip_clear(s_strip);
     ESP_LOGI(TAG, "NeoPixels ready: %d total (ring %d + Mickey %d) on GPIO %d",
-             TOTAL_LED_COUNT, RING_LED_COUNT, MICKEY_LED_COUNT, NEOPIXEL_GPIO);
+             s_total, s_ring, s_mickey, NEOPIXEL_GPIO);
 }
 
 void leds_off(void)
@@ -89,15 +112,15 @@ void leds_reward_step(void)
     const float FADE = 0.55f;      // brightness ratio between adjacent tail pixels
 
     // Comet head moves ~1 pixel every 2 frames for a smooth sweep.
-    int head = (s_reward_frame / 2) % (RING_LED_COUNT > 0 ? RING_LED_COUNT : 1);
+    int head = (s_reward_frame / 2) % (s_ring > 0 ? s_ring : 1);
 
     // Ring: clear, then paint head + tail.
-    for (int i = 0; i < RING_LED_COUNT; i++)
+    for (int i = 0; i < s_ring; i++)
         led_strip_set_pixel(s_strip, ring_px(i), 0, 0, 0);
 
     for (int t = 0; t < TAIL; t++) {
         int idx = head - t;
-        while (idx < 0) idx += RING_LED_COUNT;
+        while (idx < 0) idx += s_ring;
         float level = powf(FADE, t);                 // 1.0 at head, fading back
         uint8_t g = dim((uint32_t)(255 * level));
         led_strip_set_pixel(s_strip, ring_px(idx), 0, g, 0);
@@ -106,7 +129,7 @@ void leds_reward_step(void)
     // Mickey: pulse green with a sine so the "ears" glow along with the sweep.
     float pulse = 0.5f + 0.5f * sinf(s_reward_frame * 0.20f);   // 0..1
     uint8_t mg = dim((uint32_t)(255 * (0.25f + 0.75f * pulse)));
-    for (int i = 0; i < MICKEY_LED_COUNT; i++)
+    for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), 0, mg, 0);
 
     led_strip_refresh(s_strip);
@@ -132,13 +155,13 @@ void leds_celebrate(void)
     const int   HOLD_MS     = 1200;
 
     // 1) white comet, two laps around the ring
-    for (int step = 0; step < 2 * RING_LED_COUNT; step++) {
-        int head = step % RING_LED_COUNT;
-        for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int step = 0; step < 2 * s_ring; step++) {
+        int head = step % s_ring;
+        for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, 0, 0, 0);
         for (int t = 0; t < CHASE_TAIL; t++) {
             int idx = head - t;
-            while (idx < 0) idx += RING_LED_COUNT;
+            while (idx < 0) idx += s_ring;
             uint8_t v = dim((uint32_t)(255 * powf(CHASE_FADE, t)));
             led_strip_set_pixel(s_strip, ring_px(idx), v, v, v);
         }
@@ -159,11 +182,11 @@ void leds_celebrate(void)
     };
     for (int f = 0; f < GROW_FRAMES; f++) {
         uint8_t g = dim(255 * f / (GROW_FRAMES - 1));
-        for (int i = 0; i < RING_LED_COUNT; i++)
+        for (int i = 0; i < s_ring; i++)
             led_strip_set_pixel(s_strip, ring_px(i), 0, g, 0);
 
         const uint8_t *c = sparkle[(f * 4) / GROW_FRAMES];
-        for (int i = 0; i < MICKEY_LED_COUNT; i++) {
+        for (int i = 0; i < s_mickey; i++) {
             if ((esp_random() & 3) == 0) {                     // ~1 in 4 pixels lit
                 uint32_t lvl = 128 + (esp_random() % 128);
                 led_strip_set_pixel(s_strip, mickey_px(i),
@@ -179,7 +202,7 @@ void leds_celebrate(void)
     }
 
     // 4) land on solid green and hold
-    for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, 0, dim(255), 0);
     led_strip_refresh(s_strip);
     if (anim_wait(HOLD_MS)) return;
@@ -216,18 +239,18 @@ static void anim_welcome(void)
 {
     const uint8_t GR = 255, GG = 140, GB = 20;   // warm gold
 
-    for (int head = 0; head < RING_LED_COUNT; head++) {
+    for (int head = 0; head < s_ring; head++) {
         if (head > 0)
             led_strip_set_pixel(s_strip, ring_px(head - 1), dim(GR), dim(GG), dim(GB));
         led_strip_set_pixel(s_strip, ring_px(head), dim(255), dim(210), dim(120)); // bright head
         led_strip_refresh(s_strip);
         if (anim_wait(22)) return;
     }
-    led_strip_set_pixel(s_strip, ring_px(RING_LED_COUNT - 1), dim(GR), dim(GG), dim(GB));
+    led_strip_set_pixel(s_strip, ring_px(s_ring - 1), dim(GR), dim(GG), dim(GB));
 
     for (int f = 0; f < 50; f++) {
         uint8_t lvl = 255 * f / 49;
-        for (int i = 0; i < MICKEY_LED_COUNT; i++) {
+        for (int i = 0; i < s_mickey; i++) {
             if ((esp_random() & 7) == 0)
                 led_strip_set_pixel(s_strip, mickey_px(i), dim(255), dim(230), dim(180));
             else
@@ -240,7 +263,7 @@ static void anim_welcome(void)
 
     for (int f = 0; f < 60; f++) {
         float br = 0.7f + 0.3f * sinf(f * 0.15f);
-        for (int i = 0; i < TOTAL_LED_COUNT; i++)
+        for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim((uint32_t)(GR * br)),
                                 dim((uint32_t)(GG * br)), dim((uint32_t)(GB * br)));
         led_strip_refresh(s_strip);
@@ -252,35 +275,35 @@ static void anim_welcome(void)
 // Multicolor bursts that trail and fade, building to a white finale flash.
 static void anim_fireworks(void)
 {
-    uint8_t fb[TOTAL_LED_COUNT][3];
+    uint8_t fb[TOTAL_LED_MAX][3];
     memset(fb, 0, sizeof(fb));
 
     for (int f = 0; f < 130; f++) {
-        for (int i = 0; i < TOTAL_LED_COUNT; i++) {     // fade everything a little
+        for (int i = 0; i < s_total; i++) {     // fade everything a little
             fb[i][0] = fb[i][0] * 7 / 10;
             fb[i][1] = fb[i][1] * 7 / 10;
             fb[i][2] = fb[i][2] * 7 / 10;
         }
         for (int s = 0; s < 3; s++) {                   // spawn a few new sparks
-            int idx = esp_random() % TOTAL_LED_COUNT;
+            int idx = esp_random() % s_total;
             uint8_t r, g, b;
             hsv2rgb(esp_random() & 0xFF, 255, 255, &r, &g, &b);
             fb[idx][0] = r; fb[idx][1] = g; fb[idx][2] = b;
         }
-        for (int i = 0; i < TOTAL_LED_COUNT; i++)
+        for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim(fb[i][0]), dim(fb[i][1]), dim(fb[i][2]));
         led_strip_refresh(s_strip);
         if (anim_wait(25)) return;
     }
 
-    for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, dim(255), dim(255), dim(255));
     led_strip_refresh(s_strip);
     if (anim_wait(120)) return;
 
     for (int f = 0; f < 20; f++) {
         uint8_t v = 255 * (19 - f) / 19;
-        for (int i = 0; i < TOTAL_LED_COUNT; i++)
+        for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim(v), dim(v), dim(v));
         led_strip_refresh(s_strip);
         if (anim_wait(25)) return;
@@ -292,14 +315,14 @@ static void anim_fireworks(void)
 static void anim_rainbow(void)
 {
     for (int f = 0; f < 150; f++) {
-        for (int i = 0; i < RING_LED_COUNT; i++) {
+        for (int i = 0; i < s_ring; i++) {
             uint8_t r, g, b;
-            hsv2rgb((uint8_t)(i * 256 / RING_LED_COUNT + f * 3), 255, 255, &r, &g, &b);
+            hsv2rgb((uint8_t)(i * 256 / s_ring + f * 3), 255, 255, &r, &g, &b);
             led_strip_set_pixel(s_strip, ring_px(i), dim(r), dim(g), dim(b));
         }
         uint8_t r, g, b;
         hsv2rgb((uint8_t)(f * 4), 255, 255, &r, &g, &b);
-        for (int i = 0; i < MICKEY_LED_COUNT; i++)
+        for (int i = 0; i < s_mickey; i++)
             led_strip_set_pixel(s_strip, mickey_px(i), dim(r), dim(g), dim(b));
         led_strip_refresh(s_strip);
         if (anim_wait(20)) return;
@@ -313,18 +336,18 @@ static void anim_enchanted(void)
 {
     const uint8_t PR = 180, PG = 0, PB = 255;   // rich saturated purple
 
-    for (int head = 0; head < RING_LED_COUNT; head++) {
+    for (int head = 0; head < s_ring; head++) {
         if (head > 0)
             led_strip_set_pixel(s_strip, ring_px(head - 1), dim(PR), dim(PG), dim(PB));
         led_strip_set_pixel(s_strip, ring_px(head), dim(255), dim(255), dim(255)); // white head
         led_strip_refresh(s_strip);
         if (anim_wait(22)) return;
     }
-    led_strip_set_pixel(s_strip, ring_px(RING_LED_COUNT - 1), dim(PR), dim(PG), dim(PB));
+    led_strip_set_pixel(s_strip, ring_px(s_ring - 1), dim(PR), dim(PG), dim(PB));
 
     for (int f = 0; f < 50; f++) {
         uint8_t lvl = 255 * f / 49;
-        for (int i = 0; i < MICKEY_LED_COUNT; i++) {
+        for (int i = 0; i < s_mickey; i++) {
             if ((esp_random() & 7) == 0)
                 led_strip_set_pixel(s_strip, mickey_px(i), dim(255), dim(255), dim(255));
             else
@@ -337,7 +360,7 @@ static void anim_enchanted(void)
 
     for (int f = 0; f < 60; f++) {
         float br = 0.7f + 0.3f * sinf(f * 0.15f);
-        for (int i = 0; i < TOTAL_LED_COUNT; i++)
+        for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim((uint32_t)(PR * br)),
                                 dim((uint32_t)(PG * br)), dim((uint32_t)(PB * br)));
         led_strip_refresh(s_strip);
@@ -361,12 +384,12 @@ static void anim_beourguest(void)
     const uint8_t GR = 255, GG = 140, GB = 20;         // gold face
 
     // 1) white comet, two laps
-    for (int step = 0; step < 2 * RING_LED_COUNT; step++) {
-        int head = step % RING_LED_COUNT;
-        for (int i = 0; i < TOTAL_LED_COUNT; i++) led_strip_set_pixel(s_strip, i, 0, 0, 0);
+    for (int step = 0; step < 2 * s_ring; step++) {
+        int head = step % s_ring;
+        for (int i = 0; i < s_total; i++) led_strip_set_pixel(s_strip, i, 0, 0, 0);
         for (int t = 0; t < CHASE_TAIL; t++) {
             int idx = head - t;
-            while (idx < 0) idx += RING_LED_COUNT;
+            while (idx < 0) idx += s_ring;
             uint8_t v = dim((uint32_t)(255 * powf(CHASE_FADE, t)));
             led_strip_set_pixel(s_strip, ring_px(idx), v, v, v);
         }
@@ -381,10 +404,10 @@ static void anim_beourguest(void)
     // 3) ring blue fade-in + gold face sparkle
     for (int f = 0; f < GROW_FRAMES; f++) {
         uint8_t bl = 255 * f / (GROW_FRAMES - 1);
-        for (int i = 0; i < RING_LED_COUNT; i++)
+        for (int i = 0; i < s_ring; i++)
             led_strip_set_pixel(s_strip, ring_px(i),
                                 dim(BLU_R * bl / 255), dim(BLU_G * bl / 255), dim(BLU_B * bl / 255));
-        for (int i = 0; i < MICKEY_LED_COUNT; i++) {
+        for (int i = 0; i < s_mickey; i++) {
             if ((esp_random() & 3) == 0) {
                 uint32_t lvl = 128 + (esp_random() % 128);
                 led_strip_set_pixel(s_strip, mickey_px(i),
@@ -398,9 +421,9 @@ static void anim_beourguest(void)
     }
 
     // 4) land: blue ring, gold face
-    for (int i = 0; i < RING_LED_COUNT; i++)
+    for (int i = 0; i < s_ring; i++)
         led_strip_set_pixel(s_strip, ring_px(i), dim(BLU_R), dim(BLU_G), dim(BLU_B));
-    for (int i = 0; i < MICKEY_LED_COUNT; i++)
+    for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), dim(GR), dim(GG), dim(GB));
     led_strip_refresh(s_strip);
     if (anim_wait(HOLD_MS)) return;
@@ -429,43 +452,43 @@ void leds_sustain_step(anim_id_t id)
     static uint32_t f = 0;
     switch (id) {
         case ANIM_BEOURGUEST: {                 // hold: blue ring + gold face
-            for (int i = 0; i < RING_LED_COUNT; i++)
+            for (int i = 0; i < s_ring; i++)
                 led_strip_set_pixel(s_strip, ring_px(i), 0, dim(60), dim(255));
-            for (int i = 0; i < MICKEY_LED_COUNT; i++)
+            for (int i = 0; i < s_mickey; i++)
                 led_strip_set_pixel(s_strip, mickey_px(i), dim(255), dim(140), dim(20));
             break;
         }
         case ANIM_WELCOME: {                    // gentle gold breathe
             float br = 0.7f + 0.3f * sinf(f * 0.15f);
-            for (int i = 0; i < TOTAL_LED_COUNT; i++)
+            for (int i = 0; i < s_total; i++)
                 led_strip_set_pixel(s_strip, i, dim((uint32_t)(255 * br)),
                                     dim((uint32_t)(140 * br)), dim((uint32_t)(20 * br)));
             break;
         }
         case ANIM_ENCHANTED: {                  // gentle purple breathe
             float br = 0.7f + 0.3f * sinf(f * 0.15f);
-            for (int i = 0; i < TOTAL_LED_COUNT; i++)
+            for (int i = 0; i < s_total; i++)
                 led_strip_set_pixel(s_strip, i, dim((uint32_t)(180 * br)),
                                     0, dim((uint32_t)(255 * br)));
             break;
         }
         case ANIM_RAINBOW: {                    // keep the ring spinning
-            for (int i = 0; i < RING_LED_COUNT; i++) {
+            for (int i = 0; i < s_ring; i++) {
                 uint8_t r, g, b;
-                hsv2rgb((uint8_t)(i * 256 / RING_LED_COUNT + f * 3), 255, 255, &r, &g, &b);
+                hsv2rgb((uint8_t)(i * 256 / s_ring + f * 3), 255, 255, &r, &g, &b);
                 led_strip_set_pixel(s_strip, ring_px(i), dim(r), dim(g), dim(b));
             }
             uint8_t r, g, b;
             hsv2rgb((uint8_t)(f * 4), 255, 255, &r, &g, &b);
-            for (int i = 0; i < MICKEY_LED_COUNT; i++)
+            for (int i = 0; i < s_mickey; i++)
                 led_strip_set_pixel(s_strip, mickey_px(i), dim(r), dim(g), dim(b));
             break;
         }
         case ANIM_FIREWORKS: {                  // keep a few sparks going
-            for (int i = 0; i < TOTAL_LED_COUNT; i++)
+            for (int i = 0; i < s_total; i++)
                 led_strip_set_pixel(s_strip, i, 0, 0, 0);
             for (int s = 0; s < 4; s++) {
-                int idx = esp_random() % TOTAL_LED_COUNT;
+                int idx = esp_random() % s_total;
                 uint8_t r, g, b;
                 hsv2rgb(esp_random() & 0xFF, 255, 255, &r, &g, &b);
                 led_strip_set_pixel(s_strip, idx, dim(r), dim(g), dim(b));
@@ -474,7 +497,7 @@ void leds_sustain_step(anim_id_t id)
         }
         case ANIM_CELEBRATE:
         default:                                // hold solid green
-            for (int i = 0; i < TOTAL_LED_COUNT; i++)
+            for (int i = 0; i < s_total; i++)
                 led_strip_set_pixel(s_strip, i, 0, dim(255), 0);
             break;
     }
@@ -488,7 +511,7 @@ void leds_prog_step(void)
     float br = 0.35f + 0.35f * sinf(s_idle_frame * 0.12f);
     uint8_t r = dim((uint32_t)(255 * br));
     uint8_t g = dim((uint32_t)(110 * br));
-    for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, r, g, 0);
     led_strip_refresh(s_strip);
     s_idle_frame++;
@@ -502,7 +525,7 @@ void leds_setup_step(void)
     float breathe = 0.5f + 0.5f * sinf(s_idle_frame * 0.08f);
     uint8_t g = dim((uint32_t)(30 + 110 * breathe));
     uint8_t b = dim((uint32_t)(120 + 135 * breathe));
-    for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, 0, g, b);
     led_strip_refresh(s_strip);
     s_idle_frame++;
@@ -515,20 +538,20 @@ void leds_setup_step(void)
 // runs it for the whole "connecting" wait, then stops when Wi-Fi comes up.
 void leds_sparkle_step(void)
 {
-    static uint8_t life[RING_LED_COUNT];            // per-pixel spark countdown
+    static uint8_t life[RING_LED_MAX];            // per-pixel spark countdown
     const uint8_t  LIFE     = 48;                    // frames a spark lives
     const uint8_t  WHITE_AT = 40;                    // life > this -> white flash
-    const int      MAXLIVE  = RING_LED_COUNT / 3;    // sparse: < half the ring
+    const int      MAXLIVE  = s_ring / 3;    // sparse: < half the ring
 
     int live = 0;
-    for (int i = 0; i < RING_LED_COUNT; i++) if (life[i]) live++;
+    for (int i = 0; i < s_ring; i++) if (life[i]) live++;
 
     for (int s = 0; s < 2 && live < MAXLIVE; s++) {  // spawn up to 2 fresh sparks
-        int idx = esp_random() % RING_LED_COUNT;
+        int idx = esp_random() % s_ring;
         if (!life[idx]) { life[idx] = LIFE; live++; }
     }
 
-    for (int i = 0; i < RING_LED_COUNT; i++) {
+    for (int i = 0; i < s_ring; i++) {
         if (life[i] > WHITE_AT) {                    // fresh: bright white flash
             uint8_t w = dim(255);
             led_strip_set_pixel(s_strip, ring_px(i), w, w, w);
@@ -541,7 +564,7 @@ void leds_sparkle_step(void)
         }
         if (life[i]) life[i]--;
     }
-    for (int i = 0; i < MICKEY_LED_COUNT; i++)        // face stays dark
+    for (int i = 0; i < s_mickey; i++)        // face stays dark
         led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
 
     led_strip_refresh(s_strip);
@@ -554,7 +577,7 @@ void leds_hold_cue(int stage)
     uint8_t r = 0, g = 0, b = 0;
     if (stage == 1)      { r = dim(255); g = dim(90);  b = 0; }        // amber
     else if (stage == 2) { r = 0;        g = 0;        b = dim(255); } // blue
-    for (int i = 0; i < TOTAL_LED_COUNT; i++)
+    for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, r, g, b);
     led_strip_refresh(s_strip);
 }
@@ -579,10 +602,15 @@ void leds_idle_step(void)
         return;
     }
     float breathe = 0.5f + 0.5f * sinf(s_idle_frame * 0.05f);   // slow 0..1
-    uint8_t b = dim((uint32_t)(40 * breathe));                  // dim ceiling
-    for (int i = 0; i < RING_LED_COUNT; i++)
-        led_strip_set_pixel(s_strip, ring_px(i), 0, 0, b);
-    for (int i = 0; i < MICKEY_LED_COUNT; i++)
+    // Scale the chosen colour by the breathe curve, keeping the same dim
+    // ceiling the blue default had (40/255) so a bright colour can't glare.
+    float k = breathe * (40.0f / 255.0f);
+    uint8_t r = dim((uint32_t)(s_idle_r * k));
+    uint8_t g = dim((uint32_t)(s_idle_g * k));
+    uint8_t b = dim((uint32_t)(s_idle_b * k));
+    for (int i = 0; i < s_ring; i++)
+        led_strip_set_pixel(s_strip, ring_px(i), r, g, b);
+    for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
     led_strip_refresh(s_strip);
     s_idle_frame++;

@@ -12,6 +12,7 @@ input:disabled{opacity:.45;}
 input[type=date]{color-scheme:dark;min-height:2.6em;}
 input[type=date]::-webkit-calendar-picker-indicator{opacity:1;cursor:pointer;
 transform:scale(1.25);margin-left:.2em;}
+.row{display:flex;gap:.5em;} .row>div{flex:1;}
 input[type=checkbox]{width:auto;padding:0;margin:0 .5em 0 0;vertical-align:middle;}
 label.chk{display:flex;align-items:center;margin:.5em 0;font-size:.95em;cursor:pointer;}
 button{margin-top:1.2em;width:100%;padding:.8em;border:0;border-radius:.5em;
@@ -41,10 +42,29 @@ background:#2a2a3a;color:#ffd54a;font-weight:normal;}
 <h1>&#10024; MagicMaker {{SUFFIX}}</h1>
 <form method="POST" action="/save">
 <label>Device name</label><input name="name" value="{{NAME}}">
+<div class="status" style="margin-top:.4em">Reach this device at
+<b><a href="http://{{HOST}}/" style="color:#ffd54a">http://{{HOST}}</a></b><br>
+<small>The address follows the device name &mdash; rename it above and this
+changes too (give your computer a moment to notice).</small></div>
 <label>Trip date</label><input name="trip" type="date" value="{{DATE}}">
 <label class="chk"><input type="checkbox" name="notrip" id="notrip" {{NOTRIP}}>No trip planned yet</label>
 <label class="chk"><input type="checkbox" name="taper" {{TAPER}}>Ease off when the trip is far away
 <span class="hint" style="margin-left:.4em">(weekly at first, every day in the last month)</span></label>
+<h2>Look &amp; sound</h2>
+<label class="chk"><input type="checkbox" name="bootau" {{BOOTAU}}>Play the power-on greeting
+<span class="hint" style="margin-left:.4em">(off = wake up quietly)</span></label>
+<label>Idle glow colour</label>
+<input type="color" name="idlecol" value="{{IDLECOL}}" style="height:2.6em;padding:.2em">
+
+<h2>LED layout</h2>
+<p class="hint">Set these to match how <em>this</em> unit is actually wired &mdash;
+every build differs, and the same firmware runs on all of them. Changes apply
+straight away, so you can dial them in and watch.</p>
+<div class="row">
+  <div><label>Ring pixels</label><input name="ring" type="number" min="1" max="120" value="{{RING}}"></div>
+  <div><label>Face pixels</label><input name="face" type="number" min="0" max="120" value="{{FACE}}"></div>
+</div>
+<label class="chk"><input type="checkbox" name="ringfirst" {{RINGFIRST}}>Ring comes first in the chain</label>
 {{WIFI}}
 <button type="submit">Save</button>
 </form>

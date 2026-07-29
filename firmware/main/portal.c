@@ -18,6 +18,7 @@
 #include "bands.h"
 #include "sounds.h"
 #include "countdown.h"
+#include "leds.h"
 #include "webota.h"
 #include "wifi.h"
 #include "config.h"
@@ -184,8 +185,16 @@ static esp_err_t send_config_page(httpd_req_t *req)
             cfg.manifest_url[0] ? cfg.manifest_url : "(none)");
     }
 
+    char idlecol[10];
+    snprintf(idlecol, sizeof(idlecol), "#%06lX", (unsigned long)(cfg.idle_color & 0xFFFFFF));
+    char host[64], ring[8], face[8];
+    snprintf(host, sizeof(host), "%s.local", wifi_hostname());
+    snprintf(ring, sizeof(ring), "%d", cfg.ring_leds);
+    snprintf(face, sizeof(face), "%d", cfg.mickey_leds);
+
     const char *keys[] = { "SUFFIX", "NAME", "DATE", "NOTRIP", "TAPER", "WIFI",
-                           "FW", "ADMIN", "FWVER", "DEVID" };
+                           "FW", "ADMIN", "FWVER", "DEVID",
+                           "BOOTAU", "IDLECOL", "HOST", "RING", "FACE", "RINGFIRST" };
     const char *vals[] = {
         s_ap_mode ? "Setup" : "Config",
         cfg.device_name,
@@ -197,6 +206,12 @@ static esp_err_t send_config_page(httpd_req_t *req)
         s_ap_mode ? ADMIN_FORMS : "",
         FW_VERSION,
         wifi_device_id(),
+        cfg.boot_audio_enabled ? "checked" : "",
+        idlecol,
+        host,
+        ring,
+        face,
+        cfg.ring_first ? "checked" : "",
     };
     const int ntok = sizeof(keys) / sizeof(keys[0]);
 
@@ -310,6 +325,23 @@ static esp_err_t save_post(httpd_req_t *req)
     // no countdown. (Drives the future countdown/milestone logic.)
     cfg.countdown_enabled = !form_get(body, "notrip", buf, sizeof(buf));
     cfg.countdown_taper   = form_get(body, "taper", buf, sizeof(buf));
+    cfg.boot_audio_enabled = form_get(body, "bootau", buf, sizeof(buf));
+    cfg.ring_first         = form_get(body, "ringfirst", buf, sizeof(buf));
+
+    if (form_get(body, "idlecol", buf, sizeof(buf)) && buf[0]) {
+        const char *h = (buf[0] == '#') ? buf + 1 : buf;      // "#RRGGBB" from <input type=color>
+        cfg.idle_color = (uint32_t)strtoul(h, NULL, 16) & 0xFFFFFF;
+    }
+    // LED layout is per-device: every build is wired a little differently and one
+    // OTA image serves several units. Clamped to what the buffers are sized for.
+    if (form_get(body, "ring", buf, sizeof(buf)) && buf[0]) {
+        int v = atoi(buf);
+        if (v >= 1 && v <= RING_LED_MAX) cfg.ring_leds = v;
+    }
+    if (form_get(body, "face", buf, sizeof(buf)) && buf[0]) {
+        int v = atoi(buf);
+        if (v >= 0 && v <= MICKEY_LED_MAX) cfg.mickey_leds = v;
+    }
 
     // If the trip date moved, re-arm every band. Otherwise the once-a-day gate
     // hides the new count until tomorrow, which reads exactly like the date
@@ -331,6 +363,12 @@ static esp_err_t save_post(httpd_req_t *req)
     free(body);
 
     appcfg_save(&cfg);
+
+    // Apply the look immediately - the buffers are sized to the *_MAX ceilings,
+    // so changing counts or colour needs no reboot. Makes dialling in the LED
+    // layout for a new build a live edit rather than a flash-and-see cycle.
+    leds_set_idle_color(cfg.idle_color);
+    leds_set_layout(cfg.ring_leds, cfg.mickey_leds, cfg.ring_first);
 
     httpd_resp_set_type(req, "text/html");
     if (s_ap_mode) {

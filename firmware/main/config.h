@@ -70,12 +70,22 @@
 // Order assumption: the RING pixels come first in the chain, then MICKEY.
 // If yours is wired the other way round, set RING_FIRST to 0.
 // ===========================================================================
+// These are the DEFAULTS for a fresh device. The live values are per-device
+// settings (NVS, editable on the config page) because every physical build
+// differs - a strand gets cut to fit, a dead pixel gets removed - and one OTA
+// image now serves several units. Compile-time counts would give unit two
+// unit one's layout.
 #define RING_LED_COUNT      45       // ring is first in the chain (pixels 0-44)
                                      // was 46; first pixel died and was cut off the strand
 #define MICKEY_LED_COUNT    36       // face loop is pixels 45-80, closes at bottom
 #define RING_FIRST          1        // confirmed: ring first, then the mouse face
 
-#define TOTAL_LED_COUNT     (RING_LED_COUNT + MICKEY_LED_COUNT)
+// Allocation ceilings. Buffers and the strip driver are sized to these, so the
+// runtime counts can be anything up to them without a rebuild. Raise if you
+// build something bigger.
+#define RING_LED_MAX        120
+#define MICKEY_LED_MAX      120
+#define TOTAL_LED_MAX       (RING_LED_MAX + MICKEY_LED_MAX)
 
 // Global brightness ceiling, 0-255. 120 keeps it lively while trimming the
 // peak LED current (~20% vs 150) for more headroom on modest USB supplies -
@@ -210,7 +220,7 @@
 #define OTA_TEST_URL         "https://example.com/"
 
 // Running firmware version (bump per release; compared against the manifest).
-#define FW_VERSION           "1.0.1"
+#define FW_VERSION           "1.0.4"
 // Where the update manifest lives (override per-fetch with: update-check <url>).
 #define OTA_MANIFEST_URL     "https://example.com/manifest.json"
 
