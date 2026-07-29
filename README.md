@@ -42,13 +42,18 @@ Tap the same band a few times in a row and it gets a little cheeky about it.
 | Part | Notes |
 |---|---|
 | ESP32-S3 (N16R8) | 16 MB flash — the partition layout assumes it |
-| RC522 RFID reader | SPI, 13.56 MHz / ISO 14443A |
+| **RC522 RFID reader (mini)** | SPI, 13.56 MHz / ISO 14443A. The *mini* board is the one that fits — [Amazon](https://a.co/d/8RjPJ3M) · [AliExpress](https://a.aliexpress.com/_mMmHC4V) |
 | MAX98357A | I2S amp, mono |
 | WS2812 / NeoPixel | 81 px here: a 45-px ring + 36-px face loop, one data line |
 | 10 k potentiometer | volume (optional) |
 | Momentary button | program mode / setup |
 
-Pins, counts and behaviour all live in [`firmware/main/config.h`](firmware/main/config.h).
+Pins, counts and behaviour all live in [`firmware/main/config.h`](firmware/main/config.h),
+and the wiring is in [`docs/wiring-magicband.xlsx`](docs/wiring-magicband.xlsx).
+
+**Enclosure:** [Walt Disney World Inspired MagicBand Reader](https://makerworld.com/en/models/2020419-walt-disney-world-inspired-magicband-reader)
+on MakerWorld. Print notes and the mistakes worth avoiding are in
+[`docs/hardware-rev-notes.md`](docs/hardware-rev-notes.md).
 
 **Cards:** any ISO 14443A card works, but **MIFARE Classic 1K** is the best fit —
 its 4-byte UID is read whole. 7-byte-UID cards (NTAG21x) work, but this reader
@@ -125,8 +130,9 @@ and there's a browser-based splitter for cutting one long take into clips.
   the project this grew out of. The reward sounds come from that guide (download
   them there), and its CircuitPython logic was the starting point before this was
   rewritten in C on ESP-IDF.
-- **Enclosure:** [MakerWorld "Walt Disney World Inspired MagicBand Reader"](https://makerworld.com/en/models/2020419)
-  by its original author — not redistributed here.
+- **Enclosure:** [Walt Disney World Inspired MagicBand Reader](https://makerworld.com/en/models/2020419-walt-disney-world-inspired-magicband-reader)
+  on MakerWorld, by its original author — print it from there; no model files are
+  redistributed here.
 - Standing on: [ESP-IDF](https://github.com/espressif/esp-idf),
   [littlefs](https://github.com/littlefs-project/littlefs),
   and Espressif's `led_strip` and `mdns` components.
