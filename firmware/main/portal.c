@@ -45,8 +45,10 @@ static bool s_ap_mode;
 #define PAGE_PATH PAGE_DIR "index.html"
 
 // Setup-mode firmware controls vs the normal-mode locked note.
+// Colours live in the page's CSS variables so these blocks follow the light/dark
+// theme; anything hardcoded here would stay dark-mode on a light page.
 static const char FW_LIVE[] =
-"<p><a href='/update' style='color:#ffd54a'>Upload a firmware .bin &#8594;</a></p>";
+"<p><a href='/update'>Upload a firmware .bin &#8594;</a></p>";
 static const char FW_LOCKED[] =
 "<p class='note'>Manifest &amp; firmware upload are locked in normal mode. "
 "To change them, hold the button while powering the device on until it opens "
@@ -54,11 +56,11 @@ static const char FW_LOCKED[] =
 
 // Forget/Factory only exist in setup mode.
 static const char ADMIN_FORMS[] =
-"<hr style='border:0;border-top:1px solid #333;margin:1.4em 0'>"
+"<hr class='sep'>"
 "<form method='POST' action='/forget' style='margin-bottom:.6em'>"
-"<button type='submit' style='background:#5a5230;color:#ffe9a8'>Forget Wi-Fi</button></form>"
+"<button type='submit' class='btn-warn'>Forget Wi-Fi</button></form>"
 "<form method='POST' action='/factory'>"
-"<button type='submit' style='background:#5a2a2a;color:#ffd6d6'>Factory reset (erase everything)</button></form>"
+"<button type='submit' class='btn-danger'>Factory reset (erase everything)</button></form>"
 "<p><small>Forget Wi-Fi keeps your cards &amp; settings. Factory reset erases all of it.</small></p>";
 
 // ===========================================================================

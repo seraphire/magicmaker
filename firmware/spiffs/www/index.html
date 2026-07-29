@@ -2,86 +2,215 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="/favicon.ico">
 <title>MagicMaker {{SUFFIX}}</title><style>
-body{font-family:sans-serif;background:#101018;color:#eee;margin:0;padding:1.2em;}
-h1{font-size:1.3em;color:#ffd54a;} h2{font-size:1.05em;color:#ffd54a;margin-top:1.3em;}
-.logo{float:right;width:64px;height:64px;margin:-.2em -.2em .4em .6em;}
+/* Theme: follows the OS by default, overridden by the toggle (which sets
+   data-theme on <html> and remembers the choice). */
+:root{
+  --bg:#101018; --fg:#eeeef2; --card:#1c1c28; --line:#333; --line2:#444;
+  --accent:#ffd54a; --accentText:#ffd54a; --accentOn:#101018;
+  --muted:#9a9aa5; --ok:#7ddc7d;
+  --noteBg:#1c1c28; --noteLine:#3a3a2a; --noteFg:#ffe9a8;
+  --newBg:#22221a; --newLine:#5a5230;
+  --btn2Bg:#2a2a3a; --btn2Fg:#ffd54a;
+  --warnBg:#5a5230; --warnFg:#ffe9a8; --dangBg:#5a2a2a; --dangFg:#ffd6d6;
+  color-scheme:dark;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme=dark]){
+    --bg:#f5f2ec; --fg:#24242c; --card:#fff; --line:#ddd7ca; --line2:#c9c2b2;
+    --accent:#e8b32b; --accentText:#8a6516; --accentOn:#1b1b12;
+    --muted:#6d6a63; --ok:#1e7a3c;
+    --noteBg:#fdf6e0; --noteLine:#e2d3a0; --noteFg:#6b5316;
+    --newBg:#fdf6e0; --newLine:#e2d3a0;
+    --btn2Bg:#efe9dc; --btn2Fg:#7a5a12;
+    --warnBg:#f6e6b8; --warnFg:#6b5316; --dangBg:#f7dede; --dangFg:#8a2020;
+    color-scheme:light;
+  }
+}
+:root[data-theme=light]{
+  --bg:#f5f2ec; --fg:#24242c; --card:#fff; --line:#ddd7ca; --line2:#c9c2b2;
+  --accent:#e8b32b; --accentText:#8a6516; --accentOn:#1b1b12;
+  --muted:#6d6a63; --ok:#1e7a3c;
+  --noteBg:#fdf6e0; --noteLine:#e2d3a0; --noteFg:#6b5316;
+  --newBg:#fdf6e0; --newLine:#e2d3a0;
+  --btn2Bg:#efe9dc; --btn2Fg:#7a5a12;
+  --warnBg:#f6e6b8; --warnFg:#6b5316; --dangBg:#f7dede; --dangFg:#8a2020;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:var(--bg);
+color:var(--fg);margin:0;padding:1.1em .9em 3em;line-height:1.45;}
+/* Desktop/tablet: stop the page (and the Save button) stretching to the window. */
+.wrap{max-width:44em;margin:0 auto;}
+header{display:flex;align-items:center;gap:.6em;margin-bottom:.2em;}
+h1{font-size:1.25em;color:var(--accentText);margin:0;flex:1;}
+h2{font-size:1em;color:var(--accentText);margin:1.4em 0 .2em;}
+h2:first-child{margin-top:.4em;}
+.logo{width:48px;height:48px;flex:none;}
+#themeBtn{width:auto;margin:0;padding:.4em .6em;font-size:1.1em;line-height:1;
+background:var(--btn2Bg);color:var(--btn2Fg);border:1px solid var(--line);flex:none;}
 label{display:block;margin:.7em 0 .2em;}
-input,select{width:100%;padding:.6em;border-radius:.4em;border:1px solid #444;
-background:#1c1c28;color:#eee;box-sizing:border-box;font-size:1em;}
+input,select{width:100%;padding:.55em;border-radius:.4em;border:1px solid var(--line2);
+background:var(--card);color:var(--fg);font-size:1em;}
 input:disabled{opacity:.45;}
-input[type=date]{color-scheme:dark;min-height:2.6em;}
+input[type=date]{min-height:2.6em;}
 input[type=date]::-webkit-calendar-picker-indicator{opacity:1;cursor:pointer;
 transform:scale(1.25);margin-left:.2em;}
-.row{display:flex;gap:.5em;} .row>div{flex:1;}
+input[type=color]{height:2.6em;width:6em;padding:.2em;}
+.row{display:flex;gap:.6em;flex-wrap:wrap;} .row>div{flex:1;min-width:8em;}
 input[type=checkbox]{width:auto;padding:0;margin:0 .5em 0 0;vertical-align:middle;}
 label.chk{display:flex;align-items:center;margin:.5em 0;font-size:.95em;cursor:pointer;}
-button{margin-top:1.2em;width:100%;padding:.8em;border:0;border-radius:.5em;
-background:#ffd54a;color:#101018;font-size:1.1em;font-weight:bold;cursor:pointer;}
-small{color:#999;} .note{background:#1c1c28;border:1px solid #3a3a2a;
-border-radius:.4em;padding:.7em;color:#ffe9a8;font-size:.9em;line-height:1.35;}
-.status{background:#1c1c28;border:1px solid #333;border-radius:.4em;padding:.6em .7em;
-margin-top:.7em;font-size:.9em;color:#bbb;}
-.status b{color:#eee;} .status .ok{color:#7ddc7d;}
-/* band manager */
-.rowbtn{width:auto;margin:.3em 0;padding:.45em .9em;font-size:.9em;font-weight:normal;
-background:#2a2a3a;color:#ffd54a;}
-.newband{background:#22221a;border:1px solid #5a5230;border-radius:.5em;padding:.7em;margin:.5em 0;}
-.hint{color:#999;font-size:.85em;}
-.bandgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6em;margin-top:.5em;}
-.band{background:#1c1c28;border:1px solid #333;border-radius:.5em;padding:.6em;font-size:.9em;}
-.band.scanned{border-color:#ffd54a;box-shadow:0 0 0 2px rgba(255,213,74,.35);}
-.band .bn{font-weight:bold;color:#ffd54a;word-break:break-word;}
-.band .bs{color:#bbb;font-size:.85em;margin:.2em 0 .5em;}
-.band .uid{color:#666;font-size:.8em;}
-.band .cd{color:#9ecbff;font-size:.8em;margin:.15em 0;}
-.band button{width:auto;margin:.1em .3em .1em 0;padding:.3em .6em;font-size:.8em;
-background:#2a2a3a;color:#ffd54a;font-weight:normal;}
-.band button.del{background:#5a2a2a;color:#ffd6d6;}
-</style></head><body>
-<img src="/logo.png" alt="" class="logo">
-<h1>&#10024; MagicMaker {{SUFFIX}}</h1>
-<form method="POST" action="/save">
-<label>Device name</label><input name="name" value="{{NAME}}">
-<div class="status" style="margin-top:.4em">Reach this device at
-<b><a href="http://{{HOST}}/" style="color:#ffd54a">http://{{HOST}}</a></b><br>
-<small>The address follows the device name &mdash; rename it above and this
-changes too (give your computer a moment to notice).</small></div>
-<label>Trip date</label><input name="trip" type="date" value="{{DATE}}">
-<label class="chk"><input type="checkbox" name="notrip" id="notrip" {{NOTRIP}}>No trip planned yet</label>
-<label class="chk"><input type="checkbox" name="taper" {{TAPER}}>Ease off when the trip is far away
-<span class="hint" style="margin-left:.4em">(weekly at first, every day in the last month)</span></label>
-<h2>Look &amp; sound</h2>
-<label class="chk"><input type="checkbox" name="bootau" {{BOOTAU}}>Play the power-on greeting
-<span class="hint" style="margin-left:.4em">(off = wake up quietly)</span></label>
-<label>Idle glow colour</label>
-<input type="color" name="idlecol" value="{{IDLECOL}}" style="height:2.6em;padding:.2em">
+button{margin-top:1em;padding:.7em 1.4em;border:0;border-radius:.5em;
+background:var(--accent);color:var(--accentOn);font-size:1em;font-weight:bold;cursor:pointer;}
+small,.hint{color:var(--muted);font-size:.85em;}
+.note{background:var(--noteBg);border:1px solid var(--noteLine);border-radius:.4em;
+padding:.7em;color:var(--noteFg);font-size:.9em;}
+.status{background:var(--card);border:1px solid var(--line);border-radius:.4em;
+padding:.6em .7em;margin-top:.7em;font-size:.9em;color:var(--muted);}
+.status b{color:var(--fg);} .status .ok{color:var(--ok);}
+a,.lnk{color:var(--accentText);}
+/* --- tabs ------------------------------------------------------------- */
+nav.tabs{display:flex;gap:.25em;margin:.8em 0 .2em;border-bottom:1px solid var(--line);
+overflow-x:auto;}
+nav.tabs button{margin:0;padding:.55em .9em;border-radius:.45em .45em 0 0;
+background:transparent;color:var(--muted);font-weight:normal;font-size:.95em;
+border-bottom:2px solid transparent;white-space:nowrap;}
+nav.tabs button[aria-selected=true]{color:var(--accentText);font-weight:bold;
+border-bottom-color:var(--accent);}
+.panel[hidden]{display:none;}
+/* Save sits with the fields it saves, sized to its text rather than the window. */
+.actions{display:flex;justify-content:flex-end;gap:.6em;margin-top:1.4em;
+padding-top:1em;border-top:1px solid var(--line);}
+.actions button{margin-top:0;min-width:9em;}
+.saved{align-self:center;color:var(--ok);font-size:.9em;}
+/* --- band manager ----------------------------------------------------- */
+.rowbtn{margin:.3em 0;padding:.45em .9em;font-size:.9em;font-weight:normal;
+background:var(--btn2Bg);color:var(--btn2Fg);border:1px solid var(--line);}
+.newband{background:var(--newBg);border:1px solid var(--newLine);border-radius:.5em;
+padding:.7em;margin:.5em 0;}
+.bandgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));
+gap:.6em;margin-top:.6em;}
+.band{background:var(--card);border:1px solid var(--line);border-radius:.5em;
+padding:.6em;font-size:.9em;}
+.band.scanned{border-color:var(--accent);box-shadow:0 0 0 2px rgba(232,179,43,.35);}
+.band .bn{font-weight:bold;color:var(--accentText);word-break:break-word;}
+.band .bs{color:var(--muted);font-size:.85em;margin:.2em 0 .5em;}
+.band .uid{color:var(--muted);opacity:.75;font-size:.8em;}
+.band .cd{color:var(--accentText);opacity:.85;font-size:.8em;margin:.15em 0;}
+.band button{margin:.3em .3em 0 0;padding:.3em .6em;font-size:.8em;
+background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
+.band button.del{background:var(--dangBg);color:var(--dangFg);}
+/* Injected by portal.c (setup mode only) */
+.btn-warn{background:var(--warnBg);color:var(--warnFg);}
+.btn-danger{background:var(--dangBg);color:var(--dangFg);}
+.sep{border:0;border-top:1px solid var(--line);margin:1.4em 0;}
+</style></head><body><div class="wrap">
+<header>
+  <img src="/logo.png" alt="" class="logo">
+  <h1>&#10024; MagicMaker {{SUFFIX}}</h1>
+  <button type="button" id="themeBtn" title="Light / dark">&#9681;</button>
+</header>
 
-<h2>LED layout</h2>
-<p class="hint">Set these to match how <em>this</em> unit is actually wired &mdash;
-every build differs, and the same firmware runs on all of them. Changes apply
-straight away, so you can dial them in and watch.</p>
-<div class="row">
-  <div><label>Ring pixels</label><input name="ring" type="number" min="1" max="120" value="{{RING}}"></div>
-  <div><label>Face pixels</label><input name="face" type="number" min="0" max="120" value="{{FACE}}"></div>
-</div>
-<label class="chk"><input type="checkbox" name="ringfirst" {{RINGFIRST}}>Ring comes first in the chain</label>
-{{WIFI}}
-<button type="submit">Save</button>
+<nav class="tabs" id="tabs">
+  <button type="button" data-tab="trip"  aria-selected="true">Trip</button>
+  <button type="button" data-tab="bands" aria-selected="false">Bands</button>
+  <button type="button" data-tab="look"  aria-selected="false">Look &amp; sound</button>
+  <button type="button" data-tab="adv"   aria-selected="false">Advanced</button>
+</nav>
+
+<form method="POST" action="/save" id="cfgform">
+  <div class="panel" data-tab="trip">
+    <h2>This device</h2>
+    <label>Device name</label><input name="name" value="{{NAME}}" maxlength="32">
+    <div class="status">Reach this device at
+      <b><a href="http://{{HOST}}/">http://{{HOST}}</a></b><br>
+      <small>The address follows the device name &mdash; rename it above and this
+      changes too (give your computer a moment to notice).</small></div>
+    <h2>Countdown</h2>
+    <label>Trip date</label><input name="trip" type="date" value="{{DATE}}">
+    <label class="chk"><input type="checkbox" name="notrip" id="notrip" {{NOTRIP}}>No trip planned yet</label>
+    <label class="chk"><input type="checkbox" name="taper" {{TAPER}}>Ease off when the trip is far away</label>
+    <p class="hint">Weekly at first, then every day in the last month.</p>
+  </div>
+
+  <div class="panel" data-tab="look" hidden>
+    <h2>Look &amp; sound</h2>
+    <label class="chk"><input type="checkbox" name="bootau" {{BOOTAU}}>Play the power-on greeting</label>
+    <p class="hint">Off means it wakes up quietly.</p>
+    <label>Idle glow colour</label>
+    <input type="color" name="idlecol" value="{{IDLECOL}}">
+    <p class="hint">The slow breathe while it waits for a tap.</p>
+  </div>
+
+  <div class="panel" data-tab="adv" hidden>
+    <h2>LED layout</h2>
+    <p class="hint">Set these to match how <em>this</em> unit is actually wired &mdash;
+    every build differs and the same firmware runs on all of them. Changes apply
+    straight away, so you can dial them in and watch.</p>
+    <div class="row">
+      <div><label>Ring pixels</label><input name="ring" type="number" min="1" max="120" value="{{RING}}"></div>
+      <div><label>Face pixels</label><input name="face" type="number" min="0" max="120" value="{{FACE}}"></div>
+    </div>
+    <label class="chk"><input type="checkbox" name="ringfirst" {{RINGFIRST}}>Ring comes first in the chain</label>
+    <h2>Network &amp; updates</h2>
+    {{WIFI}}
+  </div>
+
+  <div class="actions" id="actions">
+    <button type="submit">Save</button>
+  </div>
 </form>
 
-<h2>Bands</h2>
-<div id="lastscan" class="hint">Loading&hellip;</div>
-<button type="button" class="rowbtn" id="refreshBtn">&#8635; Refresh last scan</button>
-<div id="bandgrid" class="bandgrid"></div>
+<div class="panel" data-tab="adv" hidden>
+  <h2>Firmware</h2>{{FW}}
+  {{ADMIN}}
+  <p><button type="button" class="rowbtn" id="rebootBtn">&#8635; Reboot device</button>
+  <span class="hint" id="rebootMsg"></span></p>
+</div>
 
-<h2>Firmware</h2>{{FW}}
-{{ADMIN}}
-<p><button type="button" class="rowbtn" id="rebootBtn">&#8635; Reboot device</button>
-<span class="hint" id="rebootMsg"></span></p>
+<div class="panel" data-tab="bands" hidden>
+  <h2>Bands</h2>
+  <div id="lastscan" class="hint">Loading&hellip;</div>
+  <button type="button" class="rowbtn" id="refreshBtn">&#8635; Refresh last scan</button>
+  <div id="bandgrid" class="bandgrid"></div>
+</div>
+
 <p><small>Firmware {{FWVER}} &middot; device {{DEVID}}</small></p>
+</div>
 <script>
+// --- theme ---------------------------------------------------------------
 (function(){
-  // Wi-Fi password toggle + "no trip" greys the date picker
+  var root=document.documentElement, b=document.getElementById('themeBtn');
+  try{ var t=localStorage.getItem('mm-theme'); if(t) root.setAttribute('data-theme',t); }catch(e){}
+  b.onclick=function(){
+    var cur=root.getAttribute('data-theme');
+    if(!cur) cur=matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';
+    var next=cur==='dark'?'light':'dark';
+    root.setAttribute('data-theme',next);
+    try{ localStorage.setItem('mm-theme',next); }catch(e){}
+  };
+})();
+
+// --- tabs ----------------------------------------------------------------
+(function(){
+  var nav=document.getElementById('tabs'), form=document.getElementById('cfgform');
+  function show(name){
+    [].forEach.call(document.querySelectorAll('.panel'),function(p){
+      p.hidden = p.getAttribute('data-tab')!==name; });
+    [].forEach.call(nav.children,function(b){
+      b.setAttribute('aria-selected', String(b.getAttribute('data-tab')===name)); });
+    // Save belongs to the form panels; hide it when Bands is showing.
+    form.hidden = (name==='bands');
+    try{ localStorage.setItem('mm-tab',name); }catch(e){}
+  }
+  nav.onclick=function(e){ var b=e.target.closest('button'); if(b) show(b.getAttribute('data-tab')); };
+  var start='trip';
+  try{ var s=localStorage.getItem('mm-tab');
+       if(s&&nav.querySelector('[data-tab="'+s+'"]')) start=s; }catch(e){}
+  show(start);
+})();
+
+// --- small form behaviours ----------------------------------------------
+(function(){
   var sh=document.getElementById('showpw'), pw=document.querySelector('input[name=pass]');
   if(sh&&pw) sh.addEventListener('change',function(){pw.type=sh.checked?'text':'password';});
   var nt=document.getElementById('notrip'), d=document.querySelector('input[name=trip]');
@@ -89,7 +218,7 @@ straight away, so you can dial them in and watch.</p>
   if(nt){ nt.addEventListener('change',sync); sync(); }
 })();
 
-// --- band manager -------------------------------------------------------
+// --- band manager --------------------------------------------------------
 (function(){
   var grid=document.getElementById('bandgrid'), lastEl=document.getElementById('lastscan'), sounds=[], labelOf={};
   function esc(s){return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
@@ -115,14 +244,14 @@ straight away, so you can dial them in and watch.</p>
     if(last.uid && !last.registered){
       var box=document.createElement('div'); box.className='newband';
       box.innerHTML='<div><b>New band scanned:</b> <span class="uid">'+esc(last.uid)+'</span></div>'
-        +'<label>Name</label><input class="nn" placeholder="e.g. Joe’s Mickey" maxlength="32">'
+        +'<label>Name</label><input class="nn" placeholder="e.g. Joe&#8217;s Mickey" maxlength="32">'
         +'<label>Sound</label>'+sel('random')
         +'<label>Countdown</label>'+modeSel(0)
         +'<button type="button" class="rowbtn go">Assign this band</button>';
       box.querySelector('.go').onclick=function(){ save(last.uid, box.querySelector('.nn').value, box.querySelector('.sndsel').value, box.querySelector('.cdsel').value); };
       lastEl.appendChild(box);
     } else if(last.uid && last.registered){
-      lastEl.innerHTML='<span class="hint">Last scanned: <b style="color:#ffd54a">'+esc(last.name||last.uid)+'</b> &mdash; highlighted below.</span>';
+      lastEl.innerHTML='<span class="hint">Last scanned: <b class="lnk">'+esc(last.name||last.uid)+'</b> &mdash; highlighted below.</span>';
     } else {
       lastEl.innerHTML='<span class="hint">Tap a band on the reader, then hit Refresh to name it.</span>';
     }
@@ -159,7 +288,6 @@ straight away, so you can dial them in and watch.</p>
     if(!confirm('Reboot the MagicMaker now?')) return;
     rb.disabled=true; rm.textContent=' restarting…';
     fetch('/api/reboot',{method:'POST'}).catch(function(){});
-    // It drops off the network for ~10s; poll until the page answers again.
     var tries=0;
     var iv=setInterval(function(){
       tries++;
