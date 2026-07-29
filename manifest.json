@@ -1,8 +1,8 @@
 {
   "manifest_url": "https://raw.githubusercontent.com/seraphire/magicmaker/main/manifest.json",
   "firmware": {
-    "version": "1.0.2",
-    "url": "https://github.com/seraphire/magicmaker/releases/download/v1.0.2/firmware.bin",
-    "sha256": "fa8aeafb5c5e84fe1a55853bc9a08a3c8e7995ee1a58eb104fc82e7a93c98b3b"
+    "version": "1.0.3",
+    "url": "https://github.com/seraphire/magicmaker/releases/download/v1.0.3/firmware.bin",
+    "sha256": "e5014e832177404b784e493aa4bd24fd84b17b266eb6fea807ff5377aabf55e2"
   }
 }
