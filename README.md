@@ -70,14 +70,17 @@ idf.py -C firmware -p <PORT> flash
 ## 🔊 About the audio
 
 **No audio files are included in this repository**, and the device will be silent
-until you add some. That's deliberate:
+until you add some. That's deliberate — and each kind has a different answer:
 
-- The countdown clips are a specific person's **voice**.
-- The original reward sounds came from a Disney-derived project and aren't ours
-  to redistribute.
+| Sounds | Where they come from |
+|---|---|
+| **Reward sounds** a band can be assigned — `chime`, `excellent`, `foolish`, `hello`, `operational`, `startours`, `walt-welcome`, `be-our-guest` | The [Adafruit Magic Band Reader](https://learn.adafruit.com/magic-band-reader) project — **download them from there.** They're park audio bundled with that guide, so they're not redistributed here. |
+| **Countdown clips** (`cd/`) and **spoken prompts** (`Program/`) | Recorded by you. The originals are one specific person's voice, so you'll want your own anyway — arguably the best part of the build. |
 
 Everything is designed around that — the firmware treats a missing clip as
 "skip", so it runs fine with a partial bank and gets richer as you add files.
+Grab the Adafruit sounds and it has reward audio immediately; record the
+countdown bank whenever you like.
 
 To give it a voice, drop 22050 Hz mono 16-bit WAVs into `firmware/spiffs/`:
 
@@ -91,6 +94,11 @@ To give it a voice, drop 22050 Hz mono 16-bit WAVs into `firmware/spiffs/`:
 | `cd/cheeky-N.wav` | repeat-tap comebacks |
 | `cd/after-N.wav` | after the trip has passed |
 | `cd/preamble.wav` | warm-up music before the count |
+| `chime.wav`, `excellent.wav`, … (partition root) | the reward sounds — from the [Adafruit guide](https://learn.adafruit.com/magic-band-reader) |
+
+The reward-sound list is defined in
+[`firmware/main/sounds.c`](firmware/main/sounds.c) — edit it to use whatever
+files you actually have, and the web UI picks up the change.
 
 Pools are **data-driven**: the firmware probes `lead-1`, `lead-2`, … until one is
 missing, so adding variety is just adding files — no code change, and it can be
@@ -113,10 +121,15 @@ and there's a browser-based splitter for cutting one long take into clips.
 
 ## Credits
 
-- Concept and sounds inspired by the
-  [Adafruit Magic Band Reader](https://learn.adafruit.com/magic-band-reader).
-- Enclosure: [MakerWorld "Walt Disney World Inspired MagicBand Reader"](https://makerworld.com/en/models/2020419)
+- **[Adafruit Magic Band Reader](https://learn.adafruit.com/magic-band-reader)** —
+  the project this grew out of. The reward sounds come from that guide (download
+  them there), and its CircuitPython logic was the starting point before this was
+  rewritten in C on ESP-IDF.
+- **Enclosure:** [MakerWorld "Walt Disney World Inspired MagicBand Reader"](https://makerworld.com/en/models/2020419)
   by its original author — not redistributed here.
+- Standing on: [ESP-IDF](https://github.com/espressif/esp-idf),
+  [littlefs](https://github.com/littlefs-project/littlefs),
+  and Espressif's `led_strip` and `mdns` components.
 
 ## Legal
 

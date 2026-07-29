@@ -11,15 +11,24 @@ Everything in this folder is packed into a LittleFS image and flashed to the
 
 ## What's deliberately missing: the audio
 
-**No WAV files are committed** — `.gitignore` excludes them. Two reasons:
+**No WAV files are committed** — `.gitignore` excludes them. They split into two
+groups with different answers:
 
-1. The countdown clips are a specific person's **voice**.
-2. The original reward sounds come from a Disney-derived project and aren't ours
-   to redistribute.
+**Reward sounds** (partition root) — `chime.wav`, `excellent.wav`, `foolish.wav`,
+`hello.wav`, `operational.wav`, `startours.wav`, `walt-welcome.wav`,
+`be-our-guest.wav`. These came from the
+[Adafruit Magic Band Reader](https://learn.adafruit.com/magic-band-reader)
+project — **download them from that guide.** They're park audio bundled with it,
+so they aren't redistributed here. The list lives in
+[`main/sounds.c`](../main/sounds.c); edit it to match whatever you have.
 
-**The firmware runs fine without them.** A missing clip is treated as "skip", so
-the device boots, reads bands, serves the web UI and keeps time with an empty
-bank — it's just quiet. Add files and it gets its voice back, one pool at a time.
+**Countdown clips (`cd/`) and prompts (`Program/`)** — recorded by the project's
+author, so they're one person's voice. Record your own; that's most of the charm.
+
+**The firmware runs fine without any of it.** A missing clip is treated as
+"skip", so the device boots, reads bands, serves the web UI and keeps time with
+an empty bank — it's just quiet. Add files and it finds its voice, one pool at a
+time.
 
 See the main [README](../../README.md) for the file names each pool expects, and
 [`docs/countdown-recording-script.md`](../../docs/countdown-recording-script.md)
