@@ -1,0 +1,156 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/favicon.ico">
+<title>MagicMaker {{SUFFIX}}</title><style>
+body{font-family:sans-serif;background:#101018;color:#eee;margin:0;padding:1.2em;}
+h1{font-size:1.3em;color:#ffd54a;} h2{font-size:1.05em;color:#ffd54a;margin-top:1.3em;}
+.logo{float:right;width:64px;height:64px;margin:-.2em -.2em .4em .6em;}
+label{display:block;margin:.7em 0 .2em;}
+input,select{width:100%;padding:.6em;border-radius:.4em;border:1px solid #444;
+background:#1c1c28;color:#eee;box-sizing:border-box;font-size:1em;}
+input:disabled{opacity:.45;}
+input[type=date]{color-scheme:dark;min-height:2.6em;}
+input[type=date]::-webkit-calendar-picker-indicator{opacity:1;cursor:pointer;
+transform:scale(1.25);margin-left:.2em;}
+input[type=checkbox]{width:auto;padding:0;margin:0 .5em 0 0;vertical-align:middle;}
+label.chk{display:flex;align-items:center;margin:.5em 0;font-size:.95em;cursor:pointer;}
+button{margin-top:1.2em;width:100%;padding:.8em;border:0;border-radius:.5em;
+background:#ffd54a;color:#101018;font-size:1.1em;font-weight:bold;cursor:pointer;}
+small{color:#999;} .note{background:#1c1c28;border:1px solid #3a3a2a;
+border-radius:.4em;padding:.7em;color:#ffe9a8;font-size:.9em;line-height:1.35;}
+.status{background:#1c1c28;border:1px solid #333;border-radius:.4em;padding:.6em .7em;
+margin-top:.7em;font-size:.9em;color:#bbb;}
+.status b{color:#eee;} .status .ok{color:#7ddc7d;}
+/* band manager */
+.rowbtn{width:auto;margin:.3em 0;padding:.45em .9em;font-size:.9em;font-weight:normal;
+background:#2a2a3a;color:#ffd54a;}
+.newband{background:#22221a;border:1px solid #5a5230;border-radius:.5em;padding:.7em;margin:.5em 0;}
+.hint{color:#999;font-size:.85em;}
+.bandgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.6em;margin-top:.5em;}
+.band{background:#1c1c28;border:1px solid #333;border-radius:.5em;padding:.6em;font-size:.9em;}
+.band.scanned{border-color:#ffd54a;box-shadow:0 0 0 2px rgba(255,213,74,.35);}
+.band .bn{font-weight:bold;color:#ffd54a;word-break:break-word;}
+.band .bs{color:#bbb;font-size:.85em;margin:.2em 0 .5em;}
+.band .uid{color:#666;font-size:.8em;}
+.band .cd{color:#9ecbff;font-size:.8em;margin:.15em 0;}
+.band button{width:auto;margin:.1em .3em .1em 0;padding:.3em .6em;font-size:.8em;
+background:#2a2a3a;color:#ffd54a;font-weight:normal;}
+.band button.del{background:#5a2a2a;color:#ffd6d6;}
+</style></head><body>
+<img src="/logo.png" alt="" class="logo">
+<h1>&#10024; MagicMaker {{SUFFIX}}</h1>
+<form method="POST" action="/save">
+<label>Device name</label><input name="name" value="{{NAME}}">
+<label>Trip date</label><input name="trip" type="date" value="{{DATE}}">
+<label class="chk"><input type="checkbox" name="notrip" id="notrip" {{NOTRIP}}>No trip planned yet</label>
+<label class="chk"><input type="checkbox" name="taper" {{TAPER}}>Ease off when the trip is far away
+<span class="hint" style="margin-left:.4em">(weekly at first, every day in the last month)</span></label>
+{{WIFI}}
+<button type="submit">Save</button>
+</form>
+
+<h2>Bands</h2>
+<div id="lastscan" class="hint">Loading&hellip;</div>
+<button type="button" class="rowbtn" id="refreshBtn">&#8635; Refresh last scan</button>
+<div id="bandgrid" class="bandgrid"></div>
+
+<h2>Firmware</h2>{{FW}}
+{{ADMIN}}
+<p><button type="button" class="rowbtn" id="rebootBtn">&#8635; Reboot device</button>
+<span class="hint" id="rebootMsg"></span></p>
+<p><small>Firmware {{FWVER}} &middot; device {{DEVID}}</small></p>
+<script>
+(function(){
+  // Wi-Fi password toggle + "no trip" greys the date picker
+  var sh=document.getElementById('showpw'), pw=document.querySelector('input[name=pass]');
+  if(sh&&pw) sh.addEventListener('change',function(){pw.type=sh.checked?'text':'password';});
+  var nt=document.getElementById('notrip'), d=document.querySelector('input[name=trip]');
+  function sync(){ if(d) d.disabled=nt.checked; }
+  if(nt){ nt.addEventListener('change',sync); sync(); }
+})();
+
+// --- band manager -------------------------------------------------------
+(function(){
+  var grid=document.getElementById('bandgrid'), lastEl=document.getElementById('lastscan'), sounds=[], labelOf={};
+  function esc(s){return (s||'').replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+  function lbl(id){return labelOf[id]||id;}
+  function sel(cur){var h='<select class="sndsel">';sounds.forEach(function(s){
+    h+='<option value="'+s.id+'"'+(s.id===cur?' selected':'')+'>'+esc(s.label)+'</option>';});return h+'</select>';}
+  function enc(o){return Object.keys(o).map(function(k){return encodeURIComponent(k)+'='+encodeURIComponent(o[k]);}).join('&');}
+  function post(u,o){return fetch(u,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:enc(o)}).then(function(r){return r.json();});}
+  function load(){ fetch('/api/bands').then(function(r){return r.json();}).then(render).catch(function(){
+    lastEl.textContent='Could not reach the device API.'; }); }
+  var MODES=[{v:0,t:'Daily'},{v:1,t:'Always'},{v:2,t:'Off'}];
+  function modeLabel(m){return (MODES[m]||MODES[0]).t;}
+  function modeSel(cur){var h='<select class="cdsel">';MODES.forEach(function(o){
+    h+='<option value="'+o.v+'"'+(o.v==cur?' selected':'')+'>'+o.t+'</option>';});return h+'</select>';}
+  function save(uid,name,sound,mode){ return post('/api/band',{uid:uid,name:name,sound:sound,cdmode:(mode==null?0:mode)}).then(load); }
+  function del(uid){ return post('/api/band/delete',{uid:uid}).then(load); }
+  function replay(uid){ return post('/api/countdown/replay',{uid:uid}).then(load); }
+
+  function render(d){
+    sounds=d.sounds||[]; labelOf={}; sounds.forEach(function(s){labelOf[s.id]=s.label;});
+    var last=d.last||{};
+    lastEl.innerHTML='';
+    if(last.uid && !last.registered){
+      var box=document.createElement('div'); box.className='newband';
+      box.innerHTML='<div><b>New band scanned:</b> <span class="uid">'+esc(last.uid)+'</span></div>'
+        +'<label>Name</label><input class="nn" placeholder="e.g. Joe’s Mickey" maxlength="32">'
+        +'<label>Sound</label>'+sel('random')
+        +'<label>Countdown</label>'+modeSel(0)
+        +'<button type="button" class="rowbtn go">Assign this band</button>';
+      box.querySelector('.go').onclick=function(){ save(last.uid, box.querySelector('.nn').value, box.querySelector('.sndsel').value, box.querySelector('.cdsel').value); };
+      lastEl.appendChild(box);
+    } else if(last.uid && last.registered){
+      lastEl.innerHTML='<span class="hint">Last scanned: <b style="color:#ffd54a">'+esc(last.name||last.uid)+'</b> &mdash; highlighted below.</span>';
+    } else {
+      lastEl.innerHTML='<span class="hint">Tap a band on the reader, then hit Refresh to name it.</span>';
+    }
+    grid.innerHTML='';
+    if(!(d.bands||[]).length) grid.innerHTML='<span class="hint">No bands yet.</span>';
+    (d.bands||[]).forEach(function(b){
+      var c=document.createElement('div'); c.className='band'+(last.uid===b.uid?' scanned':'');
+      c.innerHTML='<div class="bn">'+esc(b.name||'(unnamed)')+'</div>'
+        +'<div class="bs">'+esc(lbl(b.sound))+'</div>'
+        +'<div class="cd">Countdown: '+modeLabel(b.cdmode)+'</div>'
+        +'<div class="uid">'+esc(b.uid)+'</div>'
+        +'<button type="button" class="edit">Edit</button>'
+        +'<button type="button" class="rep">Again today</button>'
+        +'<button type="button" class="del">Delete</button>';
+      c.querySelector('.del').onclick=function(){ if(confirm('Delete band "'+(b.name||b.uid)+'"? This can’t be undone.')) del(b.uid); };
+      c.querySelector('.rep').onclick=function(){ replay(b.uid); };
+      c.querySelector('.edit').onclick=function(){
+        c.innerHTML='<label>Name</label><input class="nn" value="'+esc(b.name)+'" maxlength="32">'
+          +'<label>Sound</label>'+sel(b.sound)
+          +'<label>Countdown</label>'+modeSel(b.cdmode)
+          +'<button type="button" class="go">Save</button><button type="button" class="cx">Cancel</button>';
+        c.querySelector('.go').onclick=function(){ save(b.uid, c.querySelector('.nn').value, c.querySelector('.sndsel').value, c.querySelector('.cdsel').value); };
+        c.querySelector('.cx').onclick=load;
+      };
+      grid.appendChild(c);
+    });
+  }
+  document.getElementById('refreshBtn').onclick=load;
+  load();
+
+  // Reboot, so you don't have to go and unplug it.
+  var rb=document.getElementById('rebootBtn'), rm=document.getElementById('rebootMsg');
+  if(rb) rb.onclick=function(){
+    if(!confirm('Reboot the MagicMaker now?')) return;
+    rb.disabled=true; rm.textContent=' restarting…';
+    fetch('/api/reboot',{method:'POST'}).catch(function(){});
+    // It drops off the network for ~10s; poll until the page answers again.
+    var tries=0;
+    var iv=setInterval(function(){
+      tries++;
+      fetch('/?ping='+Date.now(),{cache:'no-store'}).then(function(){
+        clearInterval(iv); rm.textContent=' back up — reloading…';
+        setTimeout(function(){ location.reload(); },600);
+      }).catch(function(){
+        if(tries>30){ clearInterval(iv); rm.textContent=' still restarting — reload manually.'; }
+      });
+    },2000);
+  };
+})();
+</script>
+</body></html>

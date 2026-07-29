@@ -1,0 +1,37 @@
+# Target + flash layout for the MagicBand Reader.
+# Matches the vintage-radio board (ESP32-S3).
+CONFIG_IDF_TARGET="esp32s3"
+
+# The N16R8 module has 16 MB of flash - use it all (big sound library room).
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Custom partition table adds a "storage" SPIFFS partition for the WAV files.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# A little extra main-task stack headroom (WAV parsing + logging).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=6144
+
+# Console over native USB (USB-Serial-JTAG on GPIO19/20). Makes the one USB
+# cable carry flashing, logs, AND serial-CLI *input* - the default UART0 console
+# is output-only over USB, so the CLI couldn't read typed commands there.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# Allow the three redundant NTP servers (default max is 1).
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# --- OTA rollback (Stage 6) ---
+# A freshly-OTA'd image boots "pending verify"; the app must call
+# esp_ota_mark_app_valid_cancel_rollback() once it's up healthy, or the
+# bootloader reverts to the previous working slot on the next boot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- Defensive hardening (this device is network-facing) ---
+# Stack-smashing protection: canaries that abort on a stack-buffer overflow
+# instead of letting it corrupt memory. Small cost, always on. Keep for ship.
+CONFIG_COMPILER_STACK_CHECK_MODE_STRONG=y
+# Heap poisoning: LIGHT keeps cheap canary checks (catches heap overruns on
+# free) at negligible cost. COMPREHENSIVE (full-heap scans + freed-memory fill)
+# was the heavy dev-only mode used during bring-up - too much runtime overhead
+# for the real device. LIGHT is the shipping setting.
+CONFIG_HEAP_POISONING_LIGHT=y

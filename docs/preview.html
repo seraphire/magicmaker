@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MagicBand Reader — Soldering Wiring Map</title>
+<style>
+:root{
+  --bg:#f3f5f8; --card:#fff; --ink:#172033; --muted:#5f6b7a; --border:#d9e0e8;
+  --red:#dc2626; --black:#111827; --white:#f8fafc; --yellow:#eab308;
+  --green:#16a34a; --blue:#2563eb; --orange:#f97316; --teal:#0d9488;
+  --purple:#7c3aed;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,Segoe UI,Arial,sans-serif}
+main{max-width:1320px;margin:auto;padding:22px}
+h1{margin:0;font-size:29px}
+.subtitle{margin:7px 0 18px;color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:16px;
+      box-shadow:0 5px 20px rgba(24,39,75,.07);padding:18px;margin-bottom:18px}
+.warning{border-left:6px solid #dc2626;background:#fff7f7}
+.warning strong{color:#b91c1c}
+svg{display:block;width:100%;height:auto}
+.box{fill:#fff;stroke:#253047;stroke-width:2}
+.soft{fill:#f8fafc;stroke:#94a3b8;stroke-width:2}
+.amp{fill:#faf5ff;stroke:#7c3aed;stroke-width:2}
+.rc{fill:#f0fdf4;stroke:#16a34a;stroke-width:2}
+.powerbox{fill:#eff6ff;stroke:#2563eb;stroke-width:2}
+.neobox{fill:#fff7ed;stroke:#f97316;stroke-width:2}
+.title{font-size:20px;font-weight:750}
+.sub{font-size:13px;fill:#5f6b7a}
+.pin{font:14px ui-monospace,SFMono-Regular,Consolas,monospace}
+.wire{fill:none;stroke-width:5;stroke-linecap:round;stroke-linejoin:round}
+.w-red{stroke:var(--red)} .w-black{stroke:var(--black)} .w-white{stroke:#b8c0ca}
+.w-yellow{stroke:var(--yellow)} .w-green{stroke:var(--green)} .w-blue{stroke:var(--blue)}
+.w-orange{stroke:var(--orange)} .w-teal{stroke:var(--teal)} .w-purple{stroke:var(--purple)}
+.label{font-size:13px;font-weight:700;paint-order:stroke;stroke:#fff;stroke-width:5;stroke-linejoin:round}
+.node{stroke:#fff;stroke-width:2}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:9px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+th{background:#f8fafc}
+.chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.badge{display:inline-block;border-radius:999px;padding:3px 8px;font-size:12px;font-weight:700}
+.ok{background:#dcfce7;color:#166534}.check{background:#fef3c7;color:#92400e}
+ul{margin:8px 0 0 20px;padding:0}
+li{margin:7px 0}
+@media(max-width:900px){.grid{grid-template-columns:1fr}main{padding:10px}h1{font-size:23px}}
+@media print{body{background:#fff}.card{box-shadow:none;break-inside:avoid}main{max-width:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>MagicBand Reader — Soldering Wiring Map</h1>
+  <div class="subtitle">ESP32-S3 N16R8 · RC522 · MAX98357A · NeoPixels · volume pot · program button</div>
+
+  <div class="card warning">
+    <strong>Before soldering:</strong> disconnect both USB cables and check every wire end-to-end with continuity mode.
+    Your notes use <strong>blue for both RC522 MISO and RC522 RST</strong>, so label those two blue wires before attaching them.
+  </div>
+
+  <div class="card">
+  <svg viewBox="0 0 1280 920" aria-label="Complete wiring diagram">
+    <!-- ESP -->
+    <rect class="box" x="470" y="150" width="340" height="570" rx="18"/>
+    <text class="title" x="640" y="185" text-anchor="middle">ESP32-S3 N16R8</text>
+    <text class="sub" x="640" y="208" text-anchor="middle">pin assignments from config.h</text>
+
+    <!-- left pins -->
+    <text class="pin" x="495" y="255">3V3</text>
+    <text class="pin" x="495" y="295">GND</text>
+    <text class="pin" x="495" y="350">GPIO 5   RC522 CS/SDA</text>
+    <text class="pin" x="495" y="390">GPIO 12  RC522 SCK</text>
+    <text class="pin" x="495" y="430">GPIO 11  RC522 MOSI</text>
+    <text class="pin" x="495" y="470">GPIO 13  RC522 MISO</text>
+    <text class="pin" x="495" y="510">GPIO 4   RC522 RST</text>
+    <text class="pin" x="495" y="570">GPIO 6   Pot wiper</text>
+    <text class="pin" x="495" y="620">GPIO 7   Button</text>
+
+    <!-- right pins -->
+    <text class="pin" x="665" y="255">5V / VIN</text>
+    <text class="pin" x="665" y="295">GND</text>
+    <text class="pin" x="665" y="350">GPIO 1   I²S LRC / WS</text>
+    <text class="pin" x="665" y="390">GPIO 2   I²S BCLK</text>
+    <text class="pin" x="665" y="430">GPIO 42  I²S DIN</text>
+    <text class="pin" x="665" y="510">GPIO 21  NeoPixel DATA</text>
+
+    <!-- RC522 -->
+    <rect class="rc" x="35" y="145" width="315" height="430" rx="18"/>
+    <text class="title" x="192" y="180" text-anchor="middle">RC522 RFID Reader</text>
+    <text class="sub" x="192" y="203" text-anchor="middle">SPI · IRQ unconnected</text>
+    <text class="pin" x="65" y="255">3.3V   RED</text>
+    <text class="pin" x="65" y="295">GND    BLACK</text>
+    <text class="pin" x="65" y="350">SDA/SS WHITE → GPIO 5</text>
+    <text class="pin" x="65" y="390">SCK    YELLOW → GPIO 12</text>
+    <text class="pin" x="65" y="430">MOSI   GREEN → GPIO 11</text>
+    <text class="pin" x="65" y="470">MISO   BLUE → GPIO 13</text>
+    <text class="pin" x="65" y="510">RST    BLUE → GPIO 4</text>
+    <text class="pin" x="65" y="550">IRQ    NOT CONNECTED</text>
+
+    <!-- RC wires -->
+    <path class="wire w-red" d="M350 250 H420 V250 H470"/>
+    <path class="wire w-black" d="M350 290 H430 V290 H470"/>
+    <path class="wire w-white" d="M350 345 H470"/>
+    <path class="wire w-yellow" d="M350 385 H470"/>
+    <path class="wire w-green" d="M350 425 H470"/>
+    <path class="wire w-blue" d="M350 465 H470"/>
+    <path class="wire w-blue" d="M350 505 H420 V510 H470"/>
+
+    <!-- AMP -->
+    <rect class="amp" x="930" y="120" width="315" height="425" rx="18"/>
+    <text class="title" x="1087" y="157" text-anchor="middle">MAX98357A I²S Amp</text>
+    <text class="pin" x="958" y="225">VIN  → 5V</text>
+    <text class="pin" x="958" y="265">GND  → GND</text>
+    <text class="pin" x="958" y="325">LRC  → GPIO 1</text>
+    <text class="pin" x="958" y="365">BCLK → GPIO 2</text>
+    <text class="pin" x="958" y="405">DIN  → GPIO 42</text>
+    <text class="pin" x="958" y="465">SPK+ / SPK− → speaker</text>
+    <text class="sub" x="1087" y="505" text-anchor="middle">Do not connect either speaker output to ground</text>
+
+    <!-- amp wires -->
+    <path class="wire w-red" d="M930 220 H850 V250 H810"/>
+    <path class="wire w-black" d="M930 260 H860 V290 H810"/>
+    <path class="wire w-teal" d="M930 320 H850 V350 H810"/>
+    <path class="wire w-blue" d="M930 360 H850 V390 H810"/>
+    <path class="wire w-purple" d="M930 400 H850 V430 H810"/>
+
+    <!-- Capacitors -->
+    <rect class="soft" x="925" y="570" width="325" height="205" rx="18"/>
+    <text class="title" x="1087" y="605" text-anchor="middle">Amp supply capacitors</text>
+    <text class="sub" x="1087" y="628" text-anchor="middle">place physically close to VIN and GND</text>
+    <line x1="965" y1="665" x2="1210" y2="665" stroke="#dc2626" stroke-width="4"/>
+    <line x1="965" y1="735" x2="1210" y2="735" stroke="#111827" stroke-width="4"/>
+    <text class="pin" x="935" y="670">5V</text>
+    <text class="pin" x="935" y="740">GND</text>
+
+    <!-- electrolytic -->
+    <line x1="1030" y1="665" x2="1030" y2="687" stroke="#dc2626" stroke-width="4"/>
+    <line x1="1012" y1="690" x2="1048" y2="690" stroke="#111827" stroke-width="4"/>
+    <line x1="1017" y1="700" x2="1043" y2="700" stroke="#111827" stroke-width="2"/>
+    <line x1="1030" y1="700" x2="1030" y2="735" stroke="#111827" stroke-width="4"/>
+    <text class="pin" x="965" y="760">10µF electrolytic</text>
+    <text class="sub" x="975" y="780">positive lead to 5V</text>
+
+    <!-- ceramic -->
+    <line x1="1155" y1="665" x2="1155" y2="688" stroke="#dc2626" stroke-width="4"/>
+    <line x1="1138" y1="690" x2="1172" y2="690" stroke="#111827" stroke-width="3"/>
+    <line x1="1138" y1="700" x2="1172" y2="700" stroke="#111827" stroke-width="3"/>
+    <line x1="1155" y1="700" x2="1155" y2="735" stroke="#111827" stroke-width="4"/>
+    <text class="pin" x="1095" y="760">0.1µF ceramic</text>
+    <text class="sub" x="1105" y="780">non-polarized</text>
+
+    <!-- NeoPixels -->
+    <rect class="neobox" x="420" y="785" width="470" height="120" rx="18"/>
+    <text class="title" x="650" y="825" text-anchor="middle">NeoPixels</text>
+    <text class="pin" x="455" y="865">RED → 5V</text>
+    <text class="pin" x="605" y="865">GREEN → GPIO 21</text>
+    <text class="pin" x="855" y="865" text-anchor="end">WHITE → GND</text>
+    <path class="wire w-green" d="M640 790 V720"/>
+    <path class="wire w-red" d="M500 790 V750 H830 V250 H810"/>
+    <path class="wire w-white" d="M790 790 V760 H860 V290 H810"/>
+
+    <!-- pot -->
+    <rect class="soft" x="45" y="625" width="300" height="130" rx="18"/>
+    <text class="title" x="195" y="660" text-anchor="middle">10k Volume Pot</text>
+    <text class="pin" x="75" y="700">outer leg → 3V3</text>
+    <text class="pin" x="75" y="725">center wiper → GPIO 6</text>
+    <text class="pin" x="75" y="750">other outer leg → GND</text>
+    <path class="wire w-orange" d="M345 720 H410 V570 H470"/>
+
+    <!-- button -->
+    <rect class="soft" x="45" y="785" width="300" height="100" rx="18"/>
+    <text class="title" x="195" y="820" text-anchor="middle">Program / Trigger Button</text>
+    <text class="pin" x="75" y="855">GPIO 7 ↔ button ↔ GND</text>
+    <path class="wire w-black" d="M345 850 H420 V620 H470"/>
+  </svg>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Soldering checklist</h2>
+      <ol>
+        <li>Build the common <strong>ground</strong> connection first.</li>
+        <li>Connect the RC522 to <strong>3.3V only</strong>, never the 5V rail.</li>
+        <li>Connect MAX98357A VIN and NeoPixel red to the external 5V rail.</li>
+        <li>Add the <strong>10µF</strong> and <strong>0.1µF</strong> capacitors across amp VIN/GND.</li>
+        <li>Connect signal wires only after power and ground pass a continuity check.</li>
+        <li>Check for shorts between 5V, 3.3V, and GND before plugging in USB.</li>
+        <li>Power up without the speaker first; then attach the speaker after the board boots normally.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>Pin map</h2>
+      <table>
+        <tr><th>Device signal</th><th>ESP32-S3</th><th>Wire</th></tr>
+        <tr><td>RC522 SDA/SS</td><td class="chip">GPIO 5</td><td>White</td></tr>
+        <tr><td>RC522 SCK</td><td class="chip">GPIO 12</td><td>Yellow</td></tr>
+        <tr><td>RC522 MOSI</td><td class="chip">GPIO 11</td><td>Green</td></tr>
+        <tr><td>RC522 MISO</td><td class="chip">GPIO 13</td><td>Blue</td></tr>
+        <tr><td>RC522 RST</td><td class="chip">GPIO 4</td><td>Blue — identify carefully</td></tr>
+        <tr><td>MAX LRC/WS</td><td class="chip">GPIO 1</td><td>Trace from old layout</td></tr>
+        <tr><td>MAX BCLK</td><td class="chip">GPIO 2</td><td>Trace from old layout</td></tr>
+        <tr><td>MAX DIN</td><td class="chip">GPIO 42</td><td>Trace from old layout</td></tr>
+        <tr><td>NeoPixel data</td><td class="chip">GPIO 21</td><td>Green</td></tr>
+        <tr><td>Pot wiper</td><td class="chip">GPIO 6</td><td>Gray in photo</td></tr>
+        <tr><td>Button</td><td class="chip">GPIO 7</td><td>Button to GND</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Two details worth pausing on</h2>
+    <ul>
+      <li><span class="badge check">Verify</span> Your handwritten list says RC522 <strong>RST is blue</strong>, while MISO is also blue. Do not choose by color alone.</li>
+      <li><span class="badge ok">Confirmed</span> RC522 IRQ stays disconnected, but RST is connected to <span class="chip">GPIO 4</span> because the current software uses a hardware reset line.</li>
+      <li><span class="badge ok">Confirmed</span> The two MAX98357A supply bypass capacitors are <strong>10µF + 0.1µF in parallel</strong> between 5V and GND.</li>
+    </ul>
+  </div>
+</main>
+</body>
+</html>

@@ -1,0 +1,130 @@
+# MagicMaker
+
+A tap-point for theme-park style RFID bands, built as a countdown gift. Tap a
+band and it plays a sound, runs a light show — and tells you, out loud, how long
+is left until the trip.
+
+The countdown isn't a stack of pre-rendered clips. It's **assembled at play
+time** from a bank of recorded words:
+
+```
+[warm-up music]  "It's only"  "twenty three"  "days"  "until our Disney trip!"
+```
+
+Every number 1–31 is recorded as one natural phrase, and the unit steps up to
+weeks and then months as the date gets further out — so a number is never
+stitched together mid-word, and it never says "one hundred fifty two". As the
+trip approaches it tightens from months, to weeks, to counting every single day,
+until it's shouting *"Today's the day!"* over fireworks.
+
+Tap the same band a few times in a row and it gets a little cheeky about it.
+
+---
+
+## What it does
+
+- **Tap to play** — an RC522 reads a 13.56 MHz band/card; each one can be given
+  its own sound and animation, or set to surprise you.
+- **Spoken countdown** — composes a sentence from a clip bank; tiers by
+  today / tomorrow / days / weeks / months, with landmark lines at a week and a
+  month out, and a set of "after the trip" lines so it never goes quiet.
+- **Repeat-tap comebacks** — tapping one band repeatedly earns a random retort.
+- **Web UI** on the local network: name your bands, pick their sounds, set the
+  trip date, control per-band countdown behaviour, reboot the device.
+- **Phone setup** — first boot raises a Wi-Fi access point with a captive portal.
+- **Over-the-air updates** — firmware *and* audio, hash-verified, with automatic
+  rollback if an image doesn't boot.
+- **Keeps itself honest** — re-syncs the clock every 6 hours (no RTC, so it
+  drifts), reconnects to Wi-Fi indefinitely, and re-checks for updates.
+
+## Hardware
+
+| Part | Notes |
+|---|---|
+| ESP32-S3 (N16R8) | 16 MB flash — the partition layout assumes it |
+| RC522 RFID reader | SPI, 13.56 MHz / ISO 14443A |
+| MAX98357A | I2S amp, mono |
+| WS2812 / NeoPixel | 81 px here: a 45-px ring + 36-px face loop, one data line |
+| 10 k potentiometer | volume (optional) |
+| Momentary button | program mode / setup |
+
+Pins, counts and behaviour all live in [`firmware/main/config.h`](firmware/main/config.h).
+
+**Cards:** any ISO 14443A card works, but **MIFARE Classic 1K** is the best fit —
+its 4-byte UID is read whole. 7-byte-UID cards (NTAG21x) work, but this reader
+only takes the first 4 bytes. Avoid 125 kHz cards entirely; the RC522 can't see
+them.
+
+## Build
+
+Needs **ESP-IDF v5.5.x**.
+
+```bash
+idf.py -C firmware set-target esp32s3
+idf.py -C firmware build
+idf.py -C firmware -p <PORT> flash
+```
+
+`firmware/setup.ps1` sets up the toolchain on Windows.
+
+## 🔊 About the audio
+
+**No audio files are included in this repository**, and the device will be silent
+until you add some. That's deliberate:
+
+- The countdown clips are a specific person's **voice**.
+- The original reward sounds came from a Disney-derived project and aren't ours
+  to redistribute.
+
+Everything is designed around that — the firmware treats a missing clip as
+"skip", so it runs fine with a partial bank and gets richer as you add files.
+
+To give it a voice, drop 22050 Hz mono 16-bit WAVs into `firmware/spiffs/`:
+
+| Path | What |
+|---|---|
+| `cd/1.wav` … `cd/31.wav` | the numbers, each a whole natural phrase |
+| `cd/day.wav` `days` `week` `weeks` `month` `months` | unit words |
+| `cd/today-N.wav` `cd/tomorrow-N.wav` | full announcements for the big days |
+| `cd/lead-N.wav` | optional openers — *"it's only"*, *"guess what"* |
+| `cd/tail-N.wav` | optional closers — *"to go!"*, *"until the castle"* |
+| `cd/cheeky-N.wav` | repeat-tap comebacks |
+| `cd/after-N.wav` | after the trip has passed |
+| `cd/preamble.wav` | warm-up music before the count |
+
+Pools are **data-driven**: the firmware probes `lead-1`, `lead-2`, … until one is
+missing, so adding variety is just adding files — no code change, and it can be
+shipped over the air.
+
+[`docs/countdown-recording-script.md`](docs/countdown-recording-script.md) is the
+script used to record the original bank, with the reasoning behind the ordering,
+and there's a browser-based splitter for cutting one long take into clips.
+
+## Documentation
+
+| Doc | About |
+|---|---|
+| [ota-setup.md](docs/ota-setup.md) | hosting updates on GitHub |
+| [media-ota.md](docs/media-ota.md) | the manifest format |
+| [countdown-recording-script.md](docs/countdown-recording-script.md) | recording the clip bank |
+| [countdown-lines.md](docs/countdown-lines.md) | what's in each pool, and line ideas |
+| [roadmap-wifi-ota.md](docs/roadmap-wifi-ota.md) | how the networking stack was built |
+| [hardware-rev-notes.md](docs/hardware-rev-notes.md) | assembly lessons the hard way |
+
+## Credits
+
+- Concept and sounds inspired by the
+  [Adafruit Magic Band Reader](https://learn.adafruit.com/magic-band-reader).
+- Enclosure: [MakerWorld "Walt Disney World Inspired MagicBand Reader"](https://makerworld.com/en/models/2020419)
+  by its original author — not redistributed here.
+
+## Legal
+
+Not affiliated with, endorsed by, or connected to The Walt Disney Company. No
+Disney artwork, audio, or trademarks are included in this repository. It's a
+hobby project that happens to count down to a family holiday.
+
+## License
+
+[MIT](LICENSE) — for the code in this repository. Any audio, artwork or 3D
+models you supply are your own and are not covered by it.

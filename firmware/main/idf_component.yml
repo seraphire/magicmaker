@@ -1,0 +1,10 @@
+dependencies:
+  # Same NeoPixel/WS2812 driver the vintage-radio project uses.
+  espressif/led_strip: "^2.0.0"
+  # mDNS so each unit is reachable as magicmaker-<id>.local on the LAN.
+  espressif/mdns: "^1.2.0"
+  # LittleFS for the data partition: no SPIFFS 32-char filename cap, and it
+  # tolerates power-loss mid-write (SPIFFS could corrupt). Mounted at /spiffs
+  # (legacy base path) so every "/spiffs/..." asset path stays unchanged.
+  joltwallet/littlefs: ">=1.10.0"
+  idf: ">=5.0"
