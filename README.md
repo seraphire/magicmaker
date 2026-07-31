@@ -4,6 +4,21 @@ A tap-point for theme-park style RFID bands, built as a countdown gift. Tap a
 band and it plays a sound, runs a light show — and tells you, out loud, how long
 is left until the trip.
 
+> ### ⚠️ Alpha — public so the device can update itself
+>
+> This repo is public because the device fetches its firmware manifest over
+> HTTPS, and that needs somewhere publicly readable to fetch it *from*. It isn't
+> public because it's finished.
+>
+> It's under daily revision and **stored data is not stable yet**: NVS layouts,
+> enrolled bands and saved settings may be changed destructively between
+> commits, and an update can reset them. That freedom ends before the device is
+> given away — after that, configuration has to survive updates — but until then
+> the better design wins over the compatible one.
+>
+> By all means build one, read it, take ideas from it. Just don't expect a
+> pinned version, a migration path, or a stable API yet.
+
 The countdown isn't a stack of pre-rendered clips. It's **assembled at play
 time** from a bank of recorded words:
 
