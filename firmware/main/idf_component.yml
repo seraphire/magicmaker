@@ -7,4 +7,9 @@ dependencies:
   # tolerates power-loss mid-write (SPIFFS could corrupt). Mounted at /spiffs
   # (legacy base path) so every "/spiffs/..." asset path stays unchanged.
   joltwallet/littlefs: ">=1.10.0"
+  # Helix MP3 decoder (fixed-point, ~30 KB of working RAM). Speech at 16 kHz
+  # mono compresses roughly 8x against the 16-bit PCM WAVs, which is what keeps
+  # the 9.9 MB data partition from filling up. Decoding is streamed frame by
+  # frame, so RAM use doesn't depend on how long a clip is.
+  chmorgan/esp-libhelix-mp3: "^1.0.3"
   idf: ">=5.0"

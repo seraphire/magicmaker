@@ -213,10 +213,20 @@ esp_err_t ota_install_from_url(const char *url)
     esp_http_client_config_t http = {
         .url               = url,
         .crt_bundle_attach = esp_crt_bundle_attach,   // TLS via bundled root CAs
-        .timeout_ms        = 15000,
+        .timeout_ms        = 20000,
         .keep_alive_enable = true,
+        // A GitHub release URL 302s to a signed CDN link that runs to several
+        // hundred characters of query string. The default 512-byte TX buffer
+        // can't hold that request line, and the redirect fails as an opaque
+        // "Failed to open HTTP connection". Give it room.
+        .buffer_size       = 2048,
+        .buffer_size_tx    = 2048,
     };
-    esp_https_ota_config_t cfg = { .http_config = &http };
+    // Follow the redirect chain to the CDN host.
+    esp_https_ota_config_t cfg = {
+        .http_config           = &http,
+        .partial_http_download = false,
+    };
 
     ESP_LOGI(TAG, "OTA download: %s", url);
     esp_err_t r = esp_https_ota(&cfg);       // stream -> slot, validate, set boot

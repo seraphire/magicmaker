@@ -6,13 +6,18 @@ against this when recording. Edit freely as features land.
 ## Format
 
 - **Mono, 16-bit PCM WAV.**
-- **Spoken clips: 16 kHz** (voice needs no more; ~30% smaller than 22050).
-- **Musical stingers / chimes: 22050 Hz** (keep them crisp).
-- Keep them short and trim leading/trailing silence — the silence-keeper in
-  `audio.c` handles gaps.
-- Deployed files live in `firmware/spiffs/` (rewards) and
-  `firmware/spiffs/Program/` (prompts). Source/master takes live in
-  `hardware/audio/`.
+- Keep them short and trim leading/trailing silence — timing between words comes
+  from the clips themselves.
+- **All `cd/` clips at one sample rate.** They're concatenated to build a
+  sentence, and retuning the I2S clock mid-phrase is audible as a tick.
+  Everything else can be whatever suits it.
+- **Don't worry about levels.** Every clip is loudness-matched during the build,
+  which is what lets takes recorded months apart sound like one voice.
+
+Masters live in **`assets/audio-src/`** (`cd/`, `Program/`, and the reward
+sounds at the top level). `tools\build-audio.ps1` encodes them into
+`firmware/spiffs/`, which is **generated** — anything you drop there directly is
+pruned on the next build. See [`audio-roadmap.md`](audio-roadmap.md).
 
 ## Status legend
 

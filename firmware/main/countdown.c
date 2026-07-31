@@ -9,6 +9,7 @@
 #include "ntp.h"
 #include "appcfg.h"
 #include "leds.h"
+#include "audio.h"
 
 static const char *TAG = "countdown";
 
@@ -26,18 +27,19 @@ static const char *TAG = "countdown";
 #define CHEEKY_AFTER 3
 
 // --- small helpers ----------------------------------------------------------
+// ".wav" here is the logical name; audio_resolve() also accepts the .mp3 the
+// build script may have produced instead, so a re-encode never empties a pool.
 static bool have(const char *name)
 {
     char p[CD_PATH_MAX];
-    struct stat st;
     snprintf(p, sizeof(p), CD_DIR "%s.wav", name);
-    return stat(p, &st) == 0 && st.st_size > 44;
+    return audio_resolve(p, NULL, 0);
 }
 
 static void put(char paths[][CD_PATH_MAX], int *n, int max, const char *name)
 {
     if (*n >= max) return;
-    snprintf(paths[*n], CD_PATH_MAX, CD_DIR "%s.wav", name);
+    snprintf(paths[*n], CD_PATH_MAX, CD_DIR "%s.wav", name);   // resolved at play time
     (*n)++;
 }
 

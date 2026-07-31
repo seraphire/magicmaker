@@ -91,6 +91,11 @@
 // peak LED current (~20% vs 150) for more headroom on modest USB supplies -
 // full-white animation spikes were browning out weak USB-A ports. Raise back
 // toward 150 once running on a solid 2A+ supply (or the PCB's 5V injection).
+// Frame pacing for the animation loops (~50 fps). Shared: main.c drives the
+// idle/sustain loops with it, and the CLI holds a test animation the same way
+// so what you see over serial matches what a real tap does.
+#define FRAME_DELAY_MS      20
+
 #define LED_BRIGHTNESS      120
 
 // Demo mode: 1 = ignore cards/buttons and just cycle every animation in a loop

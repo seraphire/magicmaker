@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,6 +12,7 @@
 #include "driver/i2s_std.h"
 #include "esp_littlefs.h"
 #include "esp_log.h"
+#include "mp3dec.h"                // Helix, via chmorgan/esp-libhelix-mp3
 
 static const char *TAG = "audio";
 
@@ -268,6 +270,285 @@ static void play_wav(const char *path)
 }
 
 // ---------------------------------------------------------------------------
+// MP3 (Helix). Decoded frame by frame straight into I2S, so RAM use is fixed
+// no matter how long the clip is - a three-minute song costs the same as a
+// one-second one. Speech at 16 kHz mono lands around 8x smaller than the
+// equivalent WAV, which is what keeps the data partition from filling up.
+// ---------------------------------------------------------------------------
+#define MP3_INBUF   (2 * MAINBUF_SIZE)                    // one frame + refill slack
+#define MP3_MAXSAMP (MAX_NGRAN * MAX_NSAMP * MAX_NCHAN)   // biggest frame Helix emits
+
+// An ID3v2 tag sits in front of the audio and can contain bytes that look like
+// a frame header, so skip it properly rather than letting the sync search walk
+// into it. Leaves the file positioned at the first real frame.
+static void skip_id3v2(FILE *f)
+{
+    uint8_t h[10];
+    if (fread(h, 1, sizeof(h), f) != sizeof(h)) { fseek(f, 0, SEEK_SET); return; }
+    if (memcmp(h, "ID3", 3) != 0) { fseek(f, 0, SEEK_SET); return; }
+    // Size is 4 sync-safe bytes (7 bits each), excluding this 10-byte header.
+    uint32_t sz = ((uint32_t)(h[6] & 0x7F) << 21) | ((uint32_t)(h[7] & 0x7F) << 14) |
+                  ((uint32_t)(h[8] & 0x7F) <<  7) |  (uint32_t)(h[9] & 0x7F);
+    if (h[5] & 0x10) sz += 10;                  // footer present
+    fseek(f, 10 + (long)sz, SEEK_SET);
+    ESP_LOGD(TAG, "skipped %u-byte ID3v2 tag", (unsigned)sz);
+}
+
+// ---------------------------------------------------------------------------
+// Gapless playback.
+//
+// An MP3 doesn't hold a whole number of frames' worth of audio, so the encoder
+// pads it: a lead-in before the first real sample, and silence after the last.
+// A decoder that ignores this plays the padding, which is why a naive MP3 of a
+// 0.61 s clip comes out 0.68 s long. Standalone sounds don't care. The
+// countdown does - it butts clips together to build one sentence, and 74-102 ms
+// of silence at every join is an audible stutter.
+//
+// The amounts are recorded in the LAME/Xing tag in the first frame, so this
+// reads them and skips exactly that much. `delay` is the encoder's lead-in;
+// 529 is the decoder's own pipeline delay, which every MP3 decoder incurs and
+// Helix is no exception.
+// ---------------------------------------------------------------------------
+typedef struct {
+    bool  found;      // a Xing/Info tag was present
+    int   skip;       // samples to drop from the very start
+    long  emit;       // total samples of real audio, or 0 if unknown
+} mp3_gapless_t;
+
+#define MP3_DECODER_DELAY 529
+
+static void parse_gapless(FILE *f, mp3_gapless_t *g)
+{
+    memset(g, 0, sizeof(*g));
+    long start = ftell(f);
+
+    uint8_t h[4];
+    if (fread(h, 1, 4, f) != 4 || h[0] != 0xFF || (h[1] & 0xE0) != 0xE0) goto out;
+
+    int ver   = (h[1] >> 3) & 0x03;      // 0=MPEG2.5, 2=MPEG2, 3=MPEG1
+    int prot  =  h[1] & 0x01;            // 0 = a 16-bit CRC follows the header
+    int mono  = ((h[3] >> 6) & 0x03) == 3;
+    int mpeg1 = (ver == 3);
+    int spf   = mpeg1 ? 1152 : 576;      // samples per frame, Layer III
+    int side  = mpeg1 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+
+    // Tag sits after the header, the optional CRC, and the side info.
+    if (fseek(f, start + 4 + (prot ? 0 : 2) + side, SEEK_SET) != 0) goto out;
+
+    uint8_t tag[4];
+    if (fread(tag, 1, 4, f) != 4) goto out;
+    if (memcmp(tag, "Xing", 4) != 0 && memcmp(tag, "Info", 4) != 0) goto out;
+
+    uint8_t fl[4];
+    if (fread(fl, 1, 4, f) != 4) goto out;
+    uint32_t flags = ((uint32_t)fl[0] << 24) | (fl[1] << 16) | (fl[2] << 8) | fl[3];
+
+    long frames = 0;
+    if (flags & 0x01) {                              // frame count
+        uint8_t b[4];
+        if (fread(b, 1, 4, f) != 4) goto out;
+        frames = ((long)b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3];
+    }
+    if (flags & 0x02) fseek(f, 4,   SEEK_CUR);       // byte count
+    if (flags & 0x04) fseek(f, 100, SEEK_CUR);       // seek table
+    if (flags & 0x08) fseek(f, 4,   SEEK_CUR);       // quality
+
+    // The LAME extension starts here with a 9-byte encoder string; the packed
+    // 12-bit delay and 12-bit padding sit 21 bytes in.
+    uint8_t lame[24];
+    if (fread(lame, 1, sizeof(lame), f) != sizeof(lame)) goto out;
+    int delay   = ((int)lame[21] << 4) | (lame[22] >> 4);
+    int padding = ((int)(lame[22] & 0x0F) << 8) | lame[23];
+
+    g->found = true;
+    g->skip  = delay + MP3_DECODER_DELAY;
+    if (frames > 0) {
+        long total = frames * (long)spf;             // the tag counts audio frames
+        long real  = total - delay - padding;
+        g->emit = real > 0 ? real : 0;
+    }
+    ESP_LOGD(TAG, "gapless: delay=%d padding=%d frames=%ld -> skip %d, emit %ld",
+             delay, padding, frames, g->skip, g->emit);
+out:
+    fseek(f, start, SEEK_SET);                       // always hand the file back unmoved
+}
+
+static void play_mp3(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { ESP_LOGE(TAG, "Cannot open %s", path); return; }
+    skip_id3v2(f);
+
+    mp3_gapless_t gap;
+    parse_gapless(f, &gap);
+
+    HMP3Decoder dec  = MP3InitDecoder();
+    uint8_t *in      = malloc(MP3_INBUF);
+    int16_t *pcm     = malloc(MP3_MAXSAMP * sizeof(int16_t));
+    // Worst case one frame is all-mono samples, each doubled into stereo.
+    int16_t *out     = malloc(MP3_MAXSAMP * 2 * sizeof(int16_t));
+    if (!dec || !in || !pcm || !out) {
+        ESP_LOGE(TAG, "MP3 init OOM for %s", path);
+        goto done;
+    }
+
+    uint8_t *rp    = in;
+    int bytesLeft  = 0;
+    bool eof       = false, rate_set = false;
+    int  frames    = 0, stalls = 0;
+    int  toSkip    = gap.found ? gap.skip : 0;   // counts down over the first frames
+    long emitted   = 0;
+    size_t w;
+
+    while (!s_stop_req) {
+        // Top up whenever we're inside one frame of running dry. The memmove
+        // keeps the unconsumed tail at the front so a frame is never split.
+        if (bytesLeft < MAINBUF_SIZE && !eof) {
+            if (bytesLeft > 0 && rp != in) memmove(in, rp, bytesLeft);
+            rp = in;
+            size_t got = fread(in + bytesLeft, 1, MP3_INBUF - bytesLeft, f);
+            if (got == 0) eof = true;
+            bytesLeft += (int)got;
+        }
+        if (bytesLeft <= 0) break;
+
+        int off = MP3FindSyncWord(rp, bytesLeft);
+        if (off < 0) {                     // nothing frame-like in hand
+            if (eof) break;
+            bytesLeft = 0;                 // discard and refill
+            continue;
+        }
+        rp += off; bytesLeft -= off;
+
+        int err = MP3Decode(dec, &rp, &bytesLeft, pcm, 0);
+        if (err) {
+            // A truncated frame at the buffer edge just needs more bytes; the
+            // stall counter stops that becoming a spin if the refill can't help.
+            if (err == ERR_MP3_INDATA_UNDERFLOW && !eof && ++stalls < 8) continue;
+            if (err != ERR_MP3_INDATA_UNDERFLOW)
+                ESP_LOGW(TAG, "%s: MP3 error %d after %d frame(s)", path, err, frames);
+            break;
+        }
+        stalls = 0;
+
+        MP3FrameInfo fi;
+        MP3GetLastFrameInfo(dec, &fi);
+        if (!rate_set) {
+            i2s_set_rate((uint32_t)fi.samprate);
+            ESP_LOGI(TAG, "Playing %s (MP3, %s, %d Hz, %d kbps)", path,
+                     fi.nChans == 1 ? "mono" : "stereo", fi.samprate, fi.bitrate / 1000);
+            rate_set = true;
+        }
+
+        volume_pot_update();
+        int nframes = (fi.nChans == 2) ? fi.outputSamps / 2 : fi.outputSamps;
+        int first   = 0;
+
+        // The Xing/Info tag lives in a real frame, so Helix decodes it and hands
+        // back a frame of silence. Drop it whole rather than letting it count
+        // against the lead-in we're about to skip.
+        if (gap.found && frames == 0) { frames++; continue; }
+
+        if (toSkip > 0) {                    // encoder lead-in + decoder delay
+            if (toSkip >= nframes) { toSkip -= nframes; frames++; continue; }
+            first   = toSkip;
+            toSkip  = 0;
+        }
+        if (gap.emit > 0) {                  // and stop before the trailing padding
+            long room = gap.emit - emitted;
+            if (room <= 0) break;
+            if (nframes - first > room) nframes = first + (int)room;
+        }
+
+        for (int i = first; i < nframes; i++) {
+            int16_t m = (fi.nChans == 2)
+                        ? (int16_t)(((int32_t)pcm[i*2] + pcm[i*2+1]) / 2)   // downmix
+                        : pcm[i];
+            mono_to_stereo(m, &out[(i - first) * 2]);
+        }
+        int n = nframes - first;
+        if (n > 0) {
+            i2s_channel_write(s_tx, out, n * 4, &w, portMAX_DELAY);
+            emitted += n;
+        }
+        frames++;
+    }
+
+    if (frames == 0) {
+        ESP_LOGE(TAG, "%s: no MP3 frames decoded", path);
+    } else if (gap.found) {
+        // Sample-exact is the whole point: this should match the source WAV's
+        // count, which is how gapless gets verified without trusting an ear.
+        ESP_LOGI(TAG, "%s: %ld samples emitted (target %ld), %d frames",
+                 path, emitted, gap.emit, frames);
+    } else {
+        ESP_LOGI(TAG, "%s: %ld samples, %d frames (no gapless tag - padding kept)",
+                 path, emitted, frames);
+    }
+
+done:
+    if (dec) MP3FreeDecoder(dec);
+    free(in); free(pcm); free(out);
+    fclose(f);
+}
+
+// ---------------------------------------------------------------------------
+// Extension in a stored path is a logical name, not a promise. The build script
+// decides per folder whether a clip ships as WAV or MP3, and bands enrolled
+// months ago have "/spiffs/chime.wav" sitting in NVS. Resolving here means
+// re-encoding the media never invalidates a saved path.
+// ---------------------------------------------------------------------------
+bool audio_resolve(const char *path, char *out, size_t out_sz)
+{
+    struct stat st;
+    if (stat(path, &st) == 0 && st.st_size > 0) {
+        if (out && out_sz) { strncpy(out, path, out_sz - 1); out[out_sz - 1] = '\0'; }
+        return true;
+    }
+    const char *dot = strrchr(path, '.');
+    if (!dot || strchr(dot, '/')) return false;          // no extension to swap
+    const char *alt = (strcasecmp(dot, ".wav") == 0) ? ".mp3"
+                    : (strcasecmp(dot, ".mp3") == 0) ? ".wav" : NULL;
+    if (!alt) return false;
+
+    char cand[PATH_MAX_LEN];
+    size_t stem = (size_t)(dot - path);
+    if (stem + 5 > sizeof(cand)) return false;
+    memcpy(cand, path, stem);
+    strcpy(cand + stem, alt);
+    if (stat(cand, &st) != 0 || st.st_size <= 0) return false;
+    if (out && out_sz) { strncpy(out, cand, out_sz - 1); out[out_sz - 1] = '\0'; }
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Pick a decoder by looking at the file, not its name. Contributed audio is
+// often an MP3 called .wav (or the reverse), and a name-based guess turns that
+// into silence with no explanation.
+// ---------------------------------------------------------------------------
+static void play_file(const char *want)
+{
+    char path[PATH_MAX_LEN];
+    if (!audio_resolve(want, path, sizeof(path))) {
+        ESP_LOGE(TAG, "No such clip: %s (tried the other extension too)", want);
+        return;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) { ESP_LOGE(TAG, "Cannot open %s", path); return; }
+    uint8_t h[3] = { 0 };
+    size_t got = fread(h, 1, sizeof(h), f);
+    fclose(f);
+    if (got < 3) { ESP_LOGE(TAG, "%s is too short to identify", path); return; }
+
+    if (memcmp(h, "RIFF", 3) == 0)                        play_wav(path);
+    else if (memcmp(h, "ID3", 3) == 0 ||                  // tagged MP3
+             (h[0] == 0xFF && (h[1] & 0xE0) == 0xE0))     // bare frame sync
+                                                          play_mp3(path);
+    else ESP_LOGE(TAG, "%s: unrecognised audio (%02X %02X %02X)", path, h[0], h[1], h[2]);
+}
+
+// ---------------------------------------------------------------------------
 // The one task that owns I2S: play a queued file, otherwise stream silence.
 // ---------------------------------------------------------------------------
 static void audio_task(void *arg)
@@ -279,10 +560,24 @@ static void audio_task(void *arg)
 
     for (;;) {
         if (xQueueReceive(s_req_q, path, 0) == pdTRUE) {
+            s_playing = true;
             s_stop_req = false;     // clear here: a stop only kills the clip it
                                     // was aimed at, never the next one
-            play_wav(path);
-            s_playing = false;      // back to idle -> silence resumes
+            play_file(path);
+
+            // Only drop the flag once nothing is queued behind this clip.
+            //
+            // audio_is_playing() is "flag OR queue depth", and clearing the flag
+            // unconditionally leaves a gap at every clip boundary: xQueueReceive
+            // has already removed the next clip, so the queue reads empty, while
+            // the flag is still false from the clip that just ended. A caller
+            // sampling in that window - and the sustain loops poll every 20 ms -
+            // sees "not playing" and abandons the show mid-phrase.
+            //
+            // Keeping the flag set whenever work remains closes it: across a
+            // composed phrase the flag simply never goes false until the last
+            // clip has actually finished.
+            if (uxQueueMessagesWaiting(s_req_q) == 0) s_playing = false;
         } else {
             // Keep the amp fed so it stays quiet between sounds.
             i2s_channel_write(s_tx, silence, SIL_FRAMES * 2 * sizeof(int16_t),
@@ -303,7 +598,13 @@ void audio_init(void)
     // Deep enough for a composed countdown phrase (lead-in + number + unit +
     // trailer) plus headroom, so the parts stream back-to-back with no gap.
     s_req_q = xQueueCreate(8, PATH_MAX_LEN);
-    xTaskCreate(audio_task, "audio", 4096, NULL, 6, NULL);
+    // Pinned to core 1, away from app_main and Wi-Fi on core 0. MP3 decoding is
+    // real computation, and this task outranks the LED loop (6 against 1), so
+    // on a shared core it would win every scheduling contest and the animation
+    // would starve. The S3 has a second core; the decoder may as well use it.
+    // Stack is above the old 4096: Helix keeps its tables on the heap but still
+    // wants more stack than reading WAV bytes ever did.
+    xTaskCreatePinnedToCore(audio_task, "audio", 6144, NULL, 6, NULL, 1);
     ESP_LOGI(TAG, "Audio engine started");
 }
 

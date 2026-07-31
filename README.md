@@ -87,7 +87,10 @@ Everything is designed around that — the firmware treats a missing clip as
 Grab the Adafruit sounds and it has reward audio immediately; record the
 countdown bank whenever you like.
 
-To give it a voice, drop 22050 Hz mono 16-bit WAVs into `firmware/spiffs/`:
+To give it a voice, put mono 16-bit WAVs into **`assets/audio-src/`** and run
+`tools\build-audio.ps1`, which encodes and loudness-matches them into the data
+partition. (Not into `firmware/spiffs/` — that's build output, and anything
+placed there directly is pruned on the next build.)
 
 | Path | What |
 |---|---|
@@ -108,6 +111,11 @@ files you actually have, and the web UI picks up the change.
 Pools are **data-driven**: the firmware probes `lead-1`, `lead-2`, … until one is
 missing, so adding variety is just adding files — no code change, and it can be
 shipped over the air.
+
+The `.wav` in those paths is a *logical* name. Clips ship as MP3 (8.1 MB of
+masters become 1.58 MB, taking the partition from 84% to 16% used), and the
+firmware tries the other extension automatically — so `cd/lead-1.wav` finds
+`cd/lead-1.mp3` and nothing in the table above has to change.
 
 [`docs/countdown-recording-script.md`](docs/countdown-recording-script.md) is the
 script used to record the original bank, with the reasoning behind the ordering,

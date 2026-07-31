@@ -22,6 +22,17 @@ void leds_set_idle_color(uint32_t rgb);
 
 void leds_init(void);
 
+// Claim the strip for a whole sequence rather than a single frame. Any leds_*
+// call from another task blocks until it's released.
+//
+// leds_play() already locks for its own duration, but a caller that follows it
+// with a sustain loop needs the two to be one unit: otherwise another task's
+// idle step interleaves between sustain frames and the strip alternates between
+// two looks, which reads as a flicker. Recursive, so nesting is fine, and every
+// acquire must be matched by a release.
+void leds_acquire(void);
+void leds_release(void);
+
 // All pixels off.
 void leds_off(void);
 

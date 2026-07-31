@@ -4,6 +4,7 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "led_strip.h"
 #include "esp_random.h"
 #include "esp_log.h"
@@ -80,17 +81,75 @@ static inline int mickey_px(int i)
 // Scale a 0-255 channel by the global brightness ceiling.
 static inline uint8_t dim(uint32_t c) { return (uint8_t)(c * LED_BRIGHTNESS / 255); }
 
+// ---------------------------------------------------------------------------
+// The strip has exactly one writer at a time.
+//
+// The main loop steps the idle glow every frame, and the CLI plays whole
+// animations from the console task (cli.c). Two tasks sharing one RMT channel
+// race: led_strip_refresh() enables the channel, transmits, then disables it,
+// so if the other task enables first this one fails with "channel not in init
+// state" and that frame is silently dropped. Frames going missing at random is
+// exactly what a flicker looks like - and they also fight over the pixels,
+// idle blue painting over a celebration mid-show.
+//
+// Recursive, because the blocking animations hold the lock for their whole run
+// and still emit frames from inside it. That's deliberate: while a show is
+// playing, an idle step from the main loop should wait its turn rather than
+// interleave with it.
+// ---------------------------------------------------------------------------
+static SemaphoreHandle_t s_lock = NULL;
+
+static inline void leds_lock(void)   { if (s_lock) xSemaphoreTakeRecursive(s_lock, portMAX_DELAY); }
+static inline void leds_unlock(void) { if (s_lock) xSemaphoreGiveRecursive(s_lock); }
+
+static void show(void)
+{
+    leds_lock();
+    led_strip_refresh(s_strip);
+    leds_unlock();
+}
+
+void leds_acquire(void) { leds_lock(); }
+void leds_release(void) { leds_unlock(); }
+
 void leds_init(void)
 {
+    s_lock = xSemaphoreCreateRecursiveMutex();
+    if (!s_lock) ESP_LOGE(TAG, "no mutex for the strip; frames may be dropped");
+
     led_strip_config_t strip_config = {
         .strip_gpio_num = NEOPIXEL_GPIO,
         .max_leds       = TOTAL_LED_MAX,
     };
     led_strip_rmt_config_t rmt_config = {
         .resolution_hz = 10 * 1000 * 1000,   // 10 MHz, same as the radio project
+        // NOT with_dma. It looks like the obvious fix for frames corrupted by CPU
+        // contention, but led_strip_rmt_refresh() enables the channel, transmits,
+        // waits, then disables it for every frame - and with DMA that cycle
+        // doesn't complete, so the channel is left enabled and every later frame
+        // fails with "channel not in init state". The LEDs stop updating at all.
         .flags.with_dma = false,
+        // Instead, give the refill ISR more room. A WS2812 bit is one symbol, so
+        // the 64-symbol default is under three pixels - the ISR has to top the
+        // buffer up every ~80 us or the strip sees a gap, latches early, and the
+        // rest of the frame lands on the wrong pixels. That reads as a flicker,
+        // and MP3 decoding plus its flash reads is exactly the load that causes
+        // it. 192 symbols is all four of the S3's TX blocks, tripling the time
+        // the ISR has to get there.
+        .mem_block_symbols = 192,
     };
-    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip));
+    // Fall back rather than abort: mem_block_symbols has to be a multiple of the
+    // per-channel block size and the blocks have to be free, and a boot loop over
+    // a performance tweak would be a poor trade.
+    esp_err_t rc = led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip);
+    if (rc != ESP_OK) {
+        ESP_LOGW(TAG, "RMT with %d symbols failed (%s); falling back to the default",
+                 rmt_config.mem_block_symbols, esp_err_to_name(rc));
+        rmt_config.mem_block_symbols = 0;
+        ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_strip));
+    } else {
+        ESP_LOGI(TAG, "RMT buffer: %d symbols", rmt_config.mem_block_symbols);
+    }
     led_strip_clear(s_strip);
     ESP_LOGI(TAG, "NeoPixels ready: %d total (ring %d + Mickey %d) on GPIO %d",
              s_total, s_ring, s_mickey, NEOPIXEL_GPIO);
@@ -132,7 +191,7 @@ void leds_reward_step(void)
     for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), 0, mg, 0);
 
-    led_strip_refresh(s_strip);
+    show();
     s_reward_frame++;
 }
 
@@ -165,7 +224,7 @@ void leds_celebrate(void)
             uint8_t v = dim((uint32_t)(255 * powf(CHASE_FADE, t)));
             led_strip_set_pixel(s_strip, ring_px(idx), v, v, v);
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(CHASE_MS)) return;
     }
 
@@ -197,14 +256,14 @@ void leds_celebrate(void)
                 led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
             }
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(GROW_MS)) return;
     }
 
     // 4) land on solid green and hold
     for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, 0, dim(255), 0);
-    led_strip_refresh(s_strip);
+    show();
     if (anim_wait(HOLD_MS)) return;
 
     led_strip_clear(s_strip);
@@ -243,7 +302,7 @@ static void anim_welcome(void)
         if (head > 0)
             led_strip_set_pixel(s_strip, ring_px(head - 1), dim(GR), dim(GG), dim(GB));
         led_strip_set_pixel(s_strip, ring_px(head), dim(255), dim(210), dim(120)); // bright head
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(22)) return;
     }
     led_strip_set_pixel(s_strip, ring_px(s_ring - 1), dim(GR), dim(GG), dim(GB));
@@ -257,7 +316,7 @@ static void anim_welcome(void)
                 led_strip_set_pixel(s_strip, mickey_px(i),
                                     dim(GR * lvl / 255), dim(GG * lvl / 255), dim(GB * lvl / 255));
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(28)) return;
     }
 
@@ -266,7 +325,7 @@ static void anim_welcome(void)
         for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim((uint32_t)(GR * br)),
                                 dim((uint32_t)(GG * br)), dim((uint32_t)(GB * br)));
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(25)) return;
     }
     led_strip_clear(s_strip);
@@ -292,20 +351,20 @@ static void anim_fireworks(void)
         }
         for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim(fb[i][0]), dim(fb[i][1]), dim(fb[i][2]));
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(25)) return;
     }
 
     for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, dim(255), dim(255), dim(255));
-    led_strip_refresh(s_strip);
+    show();
     if (anim_wait(120)) return;
 
     for (int f = 0; f < 20; f++) {
         uint8_t v = 255 * (19 - f) / 19;
         for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim(v), dim(v), dim(v));
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(25)) return;
     }
     led_strip_clear(s_strip);
@@ -324,7 +383,7 @@ static void anim_rainbow(void)
         hsv2rgb((uint8_t)(f * 4), 255, 255, &r, &g, &b);
         for (int i = 0; i < s_mickey; i++)
             led_strip_set_pixel(s_strip, mickey_px(i), dim(r), dim(g), dim(b));
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(20)) return;
     }
     led_strip_clear(s_strip);
@@ -340,7 +399,7 @@ static void anim_enchanted(void)
         if (head > 0)
             led_strip_set_pixel(s_strip, ring_px(head - 1), dim(PR), dim(PG), dim(PB));
         led_strip_set_pixel(s_strip, ring_px(head), dim(255), dim(255), dim(255)); // white head
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(22)) return;
     }
     led_strip_set_pixel(s_strip, ring_px(s_ring - 1), dim(PR), dim(PG), dim(PB));
@@ -354,7 +413,7 @@ static void anim_enchanted(void)
                 led_strip_set_pixel(s_strip, mickey_px(i),
                                     dim(PR * lvl / 255), dim(PG * lvl / 255), dim(PB * lvl / 255));
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(28)) return;
     }
 
@@ -363,7 +422,7 @@ static void anim_enchanted(void)
         for (int i = 0; i < s_total; i++)
             led_strip_set_pixel(s_strip, i, dim((uint32_t)(PR * br)),
                                 dim((uint32_t)(PG * br)), dim((uint32_t)(PB * br)));
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(25)) return;
     }
     led_strip_clear(s_strip);
@@ -393,7 +452,7 @@ static void anim_beourguest(void)
             uint8_t v = dim((uint32_t)(255 * powf(CHASE_FADE, t)));
             led_strip_set_pixel(s_strip, ring_px(idx), v, v, v);
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(CHASE_MS)) return;
     }
 
@@ -416,7 +475,7 @@ static void anim_beourguest(void)
                 led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
             }
         }
-        led_strip_refresh(s_strip);
+        show();
         if (anim_wait(GROW_MS)) return;
     }
 
@@ -425,7 +484,7 @@ static void anim_beourguest(void)
         led_strip_set_pixel(s_strip, ring_px(i), dim(BLU_R), dim(BLU_G), dim(BLU_B));
     for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), dim(GR), dim(GG), dim(GB));
-    led_strip_refresh(s_strip);
+    show();
     if (anim_wait(HOLD_MS)) return;
     led_strip_clear(s_strip);
 }
@@ -433,6 +492,10 @@ static void anim_beourguest(void)
 // Dispatch: pick the animation for this tag.
 void leds_play(anim_id_t id)
 {
+    // Held for the whole show, not just per frame: an idle step from the main
+    // loop should wait until the animation is done rather than interleave blue
+    // breathing into a celebration. Recursive, so the frames inside still pass.
+    leds_lock();
     switch (id) {
         case ANIM_WELCOME:    anim_welcome();    break;
         case ANIM_FIREWORKS:  anim_fireworks();  break;
@@ -443,6 +506,7 @@ void leds_play(anim_id_t id)
         default:              leds_celebrate();  break;
     }
     s_reward_frame = 0;
+    leds_unlock();
 }
 
 // Sustain: hold/continue an animation's look while its (longer) sound finishes.
@@ -501,7 +565,7 @@ void leds_sustain_step(anim_id_t id)
                 led_strip_set_pixel(s_strip, i, 0, dim(255), 0);
             break;
     }
-    led_strip_refresh(s_strip);
+    show();
     f++;
 }
 
@@ -513,7 +577,7 @@ void leds_prog_step(void)
     uint8_t g = dim((uint32_t)(110 * br));
     for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, r, g, 0);
-    led_strip_refresh(s_strip);
+    show();
     s_idle_frame++;
 }
 
@@ -527,7 +591,7 @@ void leds_setup_step(void)
     uint8_t b = dim((uint32_t)(120 + 135 * breathe));
     for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, 0, g, b);
-    led_strip_refresh(s_strip);
+    show();
     s_idle_frame++;
 }
 
@@ -567,7 +631,7 @@ void leds_sparkle_step(void)
     for (int i = 0; i < s_mickey; i++)        // face stays dark
         led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
 
-    led_strip_refresh(s_strip);
+    show();
 }
 
 // Button hold-cue: paint a solid color so the user sees which mode the hold is
@@ -579,7 +643,7 @@ void leds_hold_cue(int stage)
     else if (stage == 2) { r = 0;        g = 0;        b = dim(255); } // blue
     for (int i = 0; i < s_total; i++)
         led_strip_set_pixel(s_strip, i, r, g, b);
-    led_strip_refresh(s_strip);
+    show();
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +676,6 @@ void leds_idle_step(void)
         led_strip_set_pixel(s_strip, ring_px(i), r, g, b);
     for (int i = 0; i < s_mickey; i++)
         led_strip_set_pixel(s_strip, mickey_px(i), 0, 0, 0);
-    led_strip_refresh(s_strip);
+    show();
     s_idle_frame++;
 }

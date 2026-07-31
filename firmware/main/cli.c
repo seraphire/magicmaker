@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "esp_console.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_app_desc.h"
 #include "esp_ota_ops.h"
@@ -172,6 +173,30 @@ static int cmd_sync_media(int argc, char **argv)
     return (r == ESP_OK) ? 0 : 1;
 }
 
+// Run an animation and then hold its sustain look until the audio finishes, the
+// way a real tap does (main.c celebrate_seq). Without the hold, an animation
+// ends the moment its choreography does while the phrase plays on - which is
+// not what the device actually does. Keeping the CLI honest matters: a test
+// path that behaves differently from the real one is how the LED refresh race
+// stayed hidden.
+static void cli_show(anim_id_t anim)
+{
+    // Held across the animation AND the sustain that follows it. leds_play()
+    // locks itself, but releasing between the two lets the main loop's idle step
+    // slip in between sustain frames - the strip then alternates between the
+    // sustain look and idle blue, which is a visible flicker that starts exactly
+    // when the animation ends. Doesn't arise on a real tap, where the main loop
+    // is the one running the show and nothing else is painting.
+    leds_acquire();
+    leds_play(anim);
+    for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {   // ~30 s cap
+        leds_sustain_step(anim);
+        vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+    }
+    leds_off();
+    leds_release();
+}
+
 // `countdown`         -> report days remaining + which tier fires.
 // `countdown <days>`  -> force-play that tier's clip + animation (test any tier
 //                        now, without waiting months or faking the clock).
@@ -191,7 +216,7 @@ static int cmd_countdown(int argc, char **argv)
         if (n > 0) {
             printf("due: FIRED -> %d clip(s)\n", n);
             for (int i = 0; i < n; i++) { printf("   %s\n", paths[i]); audio_play(paths[i]); }
-            leds_play((anim_id_t)anim);
+            cli_show((anim_id_t)anim);
         } else {
             printf("due: not due (countdown off / no clock / already greeted today)\n");
         }
@@ -210,7 +235,7 @@ static int cmd_countdown(int argc, char **argv)
         printf("%d day(s) -> tier '%s' -> %d clip(s):\n", days, countdown_tier_name(days), n);
         for (int i = 0; i < n; i++) printf("   %s\n", paths[i]);
         for (int i = 0; i < n; i++) audio_play(paths[i]);
-        leds_play((anim_id_t)anim);
+        cli_show((anim_id_t)anim);
         return 0;
     }
     int d = countdown_days_remaining();
@@ -338,6 +363,32 @@ static int cmd_status(int argc, char **argv)
     } else {
         printf("time      : not synced\n");
     }
+    // Heap: the MP3 decoder and any future clip caching live here, and the
+    // low-water mark is the number that actually matters - a comfortable
+    // "free now" can still hide a near-miss during a burst.
+    printf("heap      : %u free, %u low-water, %u largest block\n",
+           (unsigned)esp_get_free_heap_size(),
+           (unsigned)esp_get_minimum_free_heap_size(),
+           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+    return 0;
+}
+
+// Play one file through the normal audio path, so a clip can be checked without
+// enrolling a band or reaching for the reader. Decoder is chosen by sniffing the
+// file, so this exercises exactly what a tap would.
+static int cmd_play(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("usage: play <path>   e.g. play /spiffs/chime.wav\n");
+        return 1;
+    }
+    printf("playing %s\n", argv[1]);
+    audio_play(argv[1]);
+    // Wait it out so the prompt doesn't come back mid-clip and invite a second
+    // command while I2S is still busy.
+    vTaskDelay(pdMS_TO_TICKS(120));
+    while (audio_is_playing()) vTaskDelay(pdMS_TO_TICKS(50));
+    printf("done\n");
     return 0;
 }
 
@@ -346,7 +397,9 @@ void cli_start(void)
     esp_console_repl_t *repl = NULL;
     esp_console_repl_config_t rc = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     rc.prompt = "magicmaker>";
-    rc.max_cmdline_length = 64;
+    // Long enough for a real URL: `update-now <manifest url>` is comfortably
+    // past 64, and silently truncating a URL is a miserable thing to debug.
+    rc.max_cmdline_length = 256;
     rc.task_stack_size = 10240;  // commands do TLS + OTA (fetch/update/ota-url);
                                  // TLS is a heavy stack user - default ~4K blows up.
 
@@ -379,8 +432,14 @@ void cli_start(void)
     };
     const esp_console_cmd_t status_cmd = {
         .command = "status",
-        .help    = "Show device id, Wi-Fi state, and time",
+        .help    = "Show device id, Wi-Fi state, time, and free heap",
         .func    = &cmd_status,
+    };
+    const esp_console_cmd_t play_cmd = {
+        .command = "play",
+        .help    = "Play an audio file: play /spiffs/chime.wav",
+        .hint    = "<path>",
+        .func    = &cmd_play,
     };
     const esp_console_cmd_t fetch_cmd = {
         .command = "fetch",
@@ -433,6 +492,7 @@ void cli_start(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&factory));
     ESP_ERROR_CHECK(esp_console_cmd_register(&time_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&status_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&play_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&fetch_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&update_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&otaurl_cmd));

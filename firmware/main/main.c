@@ -56,9 +56,6 @@ static bool          s_boot_audio    = true;   // owner's "wake up audibly?" pre
 #define NUM_SOUNDS (sound_count())
 static inline anim_id_t anim_for_sound(const char *sound) { return sound_anim(sound); }
 
-// Frame pacing for the animation loops (~50 fps).
-#define FRAME_DELAY_MS 20
-
 // --- interrupting a moment --------------------------------------------------
 // A moment (countdown clip and/or a band's sound + animation) used to run to
 // completion with the main loop blocked, so a tap during a 7 s clip did nothing
@@ -103,8 +100,17 @@ static bool moment_interrupted(void)
 // Play a sequence of clips back-to-back (a composed countdown phrase) with one
 // animation over the whole thing. The audio queue streams them with no gap, and
 // audio_is_playing() stays true until the last one ends.
+// True while a moment (sound + show) is on screen. The network task waits for
+// this before its startup update check: a TLS handshake is heavy, this loop
+// runs at priority 1 against its 5, and landing one on top of the other makes
+// the animation stutter.
+static volatile bool s_moment_busy = false;
+
+bool app_moment_busy(void) { return s_moment_busy; }
+
 static void celebrate_seq(char paths[][CD_PATH_MAX], int n, anim_id_t anim)
 {
+    s_moment_busy = true;
     for (int i = 0; i < n; i++) audio_play(paths[i]);
     leds_play(anim);
     for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {
@@ -113,12 +119,14 @@ static void celebrate_seq(char paths[][CD_PATH_MAX], int n, anim_id_t anim)
         vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
     }
     leds_off();
+    s_moment_busy = false;
 }
 
 // Play a sound and run a chosen animation alongside it.
 static void celebrate(const char *sound, anim_id_t anim)
 {
     ESP_LOGI(TAG, "Playing %s", sound);
+    s_moment_busy = true;
     audio_play(sound);
     leds_play(anim);       // the choreographed show; sound plays on the audio task
     // If the clip is longer than the show, hold/continue the look until it ends
@@ -130,6 +138,7 @@ static void celebrate(const char *sound, anim_id_t anim)
         vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
     }
     leds_off();
+    s_moment_busy = false;
 }
 
 // Compiled-in default enrollment for a UID (from tags.h); NULL if none.
@@ -367,7 +376,21 @@ static void network_task(void *arg)
                 if (!s_quiet_boot && s_boot_audio) s_online_pending = true;  // "online" moment
             }
             if (!startup_checked) {
-                vTaskDelay(pdMS_TO_TICKS(4000));   // let boot/"online" audio settle
+                // Wait for the boot moment to actually finish, rather than
+                // guessing at it. The old fixed 4 s was tuned to the audio -
+                // operational.wav is ~2.1 s - but the "online" moment is
+                // animation-bound: ANIM_CELEBRATE runs ~4.5 s. So the sleep
+                // expired mid-show and the TLS handshake landed on top of it,
+                // stuttering the green ring. Capped so a wedged moment can't
+                // hold the update check off forever.
+                // Pending counts as busy. This task is what SETS
+                // s_online_pending, and the main loop only turns that into a
+                // moment on its next pass - so checking "busy" alone finds
+                // nothing running yet and sails straight through, which is
+                // exactly what it did: the check fired 480 ms into the show.
+                for (int i = 0; i < 120 && (s_online_pending || app_moment_busy()); i++)
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                vTaskDelay(pdMS_TO_TICKS(500));    // let the last frame land
                 check_for_updates("startup");
                 startup_checked = true;
             } else {
@@ -503,6 +526,10 @@ void app_main(void)
     for (;;) {
 #if WIFI_ENABLE
         if (s_online_pending) {              // network task joined home Wi-Fi -> "online" moment
+            // Claim before releasing, so the two flags are never both clear.
+            // The network task waits on "pending or busy" before its update
+            // check; clearing pending first leaves a gap where it sees neither.
+            s_moment_busy    = true;
             s_online_pending = false;
             celebrate(BOOT_SOUND_OPERATIONAL, anim_for_sound(BOOT_SOUND_OPERATIONAL));
         }

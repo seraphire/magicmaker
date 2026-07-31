@@ -8,7 +8,10 @@ dependencies.lock
 # --- audio is deliberately NOT in this repo ---------------------------------
 # The countdown clips are a personal voice recording, and the original reward
 # sounds are Disney-derived and not ours to redistribute. See the README.
-# Drop your own WAVs into firmware/spiffs/ locally; they stay out of git.
+# Put your own recordings in assets/audio-src/ and run tools\build-audio.ps1;
+# they stay out of git. firmware/spiffs audio is generated from those masters,
+# so it's ignored too - see firmware/spiffs/README.md.
+assets/audio-src/
 firmware/spiffs/**/*.wav
 firmware/spiffs/**/*.mp3
 

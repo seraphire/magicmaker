@@ -135,7 +135,11 @@ static esp_err_t download_verify(const char *url, const char *tmp, const char *e
         .event_handler     = dl_event,
         .user_data         = &c,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms        = 15000,
+        .timeout_ms        = 20000,
+        // Same reason as the firmware download: a redirect to a signed CDN link
+        // (GitHub releases, S3, ...) overflows the default 512-byte TX buffer.
+        .buffer_size       = 2048,
+        .buffer_size_tx    = 2048,
     };
     esp_http_client_handle_t cl = esp_http_client_init(&cfg);
     esp_err_t r = cl ? esp_http_client_perform(cl) : ESP_FAIL;
