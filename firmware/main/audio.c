@@ -138,9 +138,28 @@ static void i2s_set_rate(uint32_t rate)
     else               ESP_LOGW(TAG, "I2S retune to %u Hz failed: %s", (unsigned)rate, esp_err_to_name(r));
 }
 
+// Peak-hold of recent output, for LED effects that follow the sound. Every
+// sample raises it; audio_level() lets it fall. Sampling the raw amplitude
+// instead would strobe - this holds each syllable's peak so the decay between
+// them is what shows.
+static volatile uint8_t s_level = 0;
+
 // Write one mono int16 to both stereo slots, applying software volume.
 static inline void mono_to_stereo(int16_t sample, int16_t out[2])
 {
+    // Level BEFORE volume. The pulse follows what the clip is doing, not how
+    // loud the room wants it.
+    //
+    // Measured the other way round: with the knob turned down the level peaked
+    // at 57 of 255 where the effect is tuned for ~165, so the cheeky pulse
+    // swung over roughly 18 distinct brightness values instead of 120. That
+    // reads as a choppy animation, and it is one - at that range consecutive
+    // frames round to the same value and the light genuinely stops moving.
+    // Turning the volume down should not dim the light show.
+    int32_t a = sample < 0 ? -(int32_t)sample : sample;   // int32: -32768 negates out of range
+    uint8_t l = (uint8_t)(a >> 7);                        // 0..255
+    if (l > s_level) s_level = l;
+
     int vol = s_volume;
     if (vol != 256) {
         int32_t s = ((int32_t)sample * vol) >> 8;
@@ -148,8 +167,18 @@ static inline void mono_to_stereo(int16_t sample, int16_t out[2])
         if (s < -32768) s = -32768;
         sample = (int16_t)s;
     }
+
     out[0] = sample;
     out[1] = sample;
+}
+
+uint8_t audio_level(void)
+{
+    uint8_t v = s_level;
+    // Decay on read rather than on a timer: the caller is an animation loop at a
+    // steady frame rate, so this is the release, and it costs no extra task.
+    s_level = (uint8_t)((v * 3) / 4);
+    return v;
 }
 
 // ---------------------------------------------------------------------------

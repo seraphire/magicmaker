@@ -33,8 +33,17 @@ void leds_init(void);
 void leds_acquire(void);
 void leds_release(void);
 
-// All pixels off.
+// All pixels off, immediately.
 void leds_off(void);
+
+// Ease down from whatever is currently showing, then off. Use at the end of a
+// moment: leds_off() cuts to black and the idle glow starts breathing up from
+// nothing, which reads as two abrupt events rather than one ending.
+//
+// Duration comes from the idle breathe - a quarter of its full cycle, so the
+// fade out is twice the speed of the glow coming back. Aborts early if the
+// registered abort check fires, so a new tap isn't left waiting on it.
+void leds_fade_out(void);
 
 // One frame of the "waiting for a tap" look. Call while idle.
 void leds_idle_step(void);
@@ -63,6 +72,20 @@ void leds_hold_cue(int stage);
 // One frame of the "band accepted!" celebration. Call while audio plays.
 void leds_reward_step(void);
 
+// One frame of an audio-reactive pulse: the ring brightens with the sound and
+// fades between syllables, like a slow VU meter. Pass audio_level() each frame.
+//
+// Deliberately not a direct amplitude-to-brightness mapping - that strobes.
+// This attacks fast and releases slowly, so it follows the rhythm of a voice,
+// and it never falls to black, so the pulse reads as breathing rather than
+// blinking. Cheap enough for a repeat-tap aside that doesn't warrant a full
+// choreographed show.
+void leds_pulse_step(uint8_t level, uint32_t rgb);
+
+// Reset the pulse envelope so the next moment starts from rest instead of
+// inheriting the last one's decay.
+void leds_pulse_reset(void);
+
 // The full choreographed celebration (white chase -> beat -> green fade +
 // face sparkle -> solid green). Blocks ~4.5 s; play the sound just before it.
 void leds_celebrate(void);
@@ -76,6 +99,11 @@ typedef enum {
     ANIM_RAINBOW,         // rainbow spinning round the ring, face cycling hue
     ANIM_ENCHANTED,       // purple fill + bright white leading pixel (gold's twin)
     ANIM_BEOURGUEST,      // white chase -> blue ring fade, gold-sparkle Mickey face
+    // Not choreographed: the caller drives leds_pulse_step() per frame from the
+    // audio level. For asides like the repeat-tap cheeky lines, where a full
+    // show would oversell a one-liner. New ids go before ANIM_COUNT and after
+    // the existing ones - the values are stored in NVS against enrolled bands.
+    ANIM_PULSE,
     ANIM_COUNT
 } anim_id_t;
 

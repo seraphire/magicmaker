@@ -2,7 +2,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>          // unlink() - drop a partial upload
 #include <sys/stat.h>
+#include "esp_littlefs.h"    // free-space check before accepting a file
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
@@ -14,6 +16,7 @@
 #include "nvs.h"
 #include "cJSON.h"
 #include "appcfg.h"
+#include "assets.h"
 #include "store.h"
 #include "bands.h"
 #include "sounds.h"
@@ -22,6 +25,7 @@
 #include "webota.h"
 #include "wifi.h"
 #include "config.h"
+#include "app.h"
 
 static const char *TAG = "portal";
 static httpd_handle_t s_httpd;
@@ -168,23 +172,37 @@ static esp_err_t send_config_page(httpd_req_t *req)
     // them as disabled boxes was just noise - an empty password field you can't
     // read or set, and a "show password" toggle with nothing to show. Show the
     // useful part (which network, is it up) as read-only status instead.
-    char *wifi = malloc(768);
+    // " (version N)" if a pack has been applied - the answer to "did the audio
+    // I sent actually land?", which a URL alone doesn't give.
+    char packver[64] = "";
+    {
+        char v[33];
+        assets_pack_version(v, sizeof(v));
+        if (v[0]) snprintf(packver, sizeof(packver), " <small>version %s</small>", v);
+    }
+
+    char *wifi = malloc(1024);
     if (!wifi) return ESP_FAIL;
     if (s_ap_mode) {
-        snprintf(wifi, 768,
+        snprintf(wifi, 1024,
             "<label>Wi-Fi network</label><input name='ssid' value='%s'>"
             "<label>Wi-Fi password</label><input name='pass' type='password' placeholder='(unchanged)'>"
             "<label class='chk'><input type='checkbox' id='showpw'>Show password</label>"
-            "<label>Update manifest URL</label><input name='manif' value='%s'>",
-            cfg.wifi_ssid, cfg.manifest_url);
+            "<label>Update manifest URL</label><input name='manif' value='%s'>"
+            "<label>Audio pack URL</label><input name='assetu' value='%s' placeholder='(none)'>"
+            "<small>Optional, and private to this device - where its sounds come from.</small>",
+            cfg.wifi_ssid, cfg.manifest_url, cfg.assets_url);
     } else {
-        snprintf(wifi, 768,
+        snprintf(wifi, 1024,
             "<div class='status'>Wi-Fi: <b>%s</b> %s<br>"
             "Updates: <b>%s</b><br>"
+            "Audio pack: <b>%s</b>%s<br>"
             "<small>To change these, hold the button while powering the device on.</small></div>",
             cfg.wifi_ssid[0] ? cfg.wifi_ssid : "(none)",
             wifi_is_connected() ? "<span class='ok'>&#10003; connected</span>" : "(not connected)",
-            cfg.manifest_url[0] ? cfg.manifest_url : "(none)");
+            cfg.manifest_url[0] ? cfg.manifest_url : "(none)",
+            cfg.assets_url[0] ? cfg.assets_url : "(none)",
+            packver);
     }
 
     char idlecol[10];
@@ -277,7 +295,19 @@ static esp_err_t serve_file(httpd_req_t *req, const char *path, const char *ctyp
 // The real favicon + the corner logo, served from /spiffs/www/. Registered
 // explicitly so they win over the AP catch-all.
 static esp_err_t favicon_get(httpd_req_t *req) { return serve_file(req, PAGE_DIR "favicon.ico", "image/x-icon"); }
-static esp_err_t logo_get(httpd_req_t *req)    { return serve_file(req, PAGE_DIR "logo.png",    "image/png"); }
+
+// A request for the logo means a browser is laying the page out, not just
+// probing it - see portal_page_seen(). It's the only honest "they found it"
+// signal we have in AP mode, where every URL answers with the page.
+static volatile bool s_page_seen = false;
+bool portal_page_seen(void)       { return s_page_seen; }
+void portal_clear_page_seen(void) { s_page_seen = false; }
+
+static esp_err_t logo_get(httpd_req_t *req)
+{
+    s_page_seen = true;
+    return serve_file(req, PAGE_DIR "logo.png", "image/png");
+}
 
 // A small task that waits, then reboots - lets the HTTP response flush first.
 static void reboot_task(void *arg)
@@ -285,6 +315,77 @@ static void reboot_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(1500));
     ESP_LOGW(TAG, "Rebooting to apply new configuration");
     esp_restart();
+}
+
+// Setup mode only. The credentials are saved, the reader is about to reboot onto
+// the home network, and this page - served from the SoftAP that is seconds from
+// vanishing - is orphaned. Rather than "you can close this page", hand the user
+// over: say what is happening, show the address to type, and quietly probe for
+// the device coming back up on the LAN.
+//
+// The probe is an <img> load rather than fetch(): an image load is not subject
+// to CORS (only reading its pixels is), so this needs nothing on the device side
+// beyond the favicon already served. Cache-busted per attempt so a failed lookup
+// is not remembered.
+//
+// The instructions are the feature and the redirect is the bonus, because three
+// things here are outside our control: the phone may come back on cellular
+// rather than Wi-Fi, Android's mDNS resolution of ".local" is unreliable before
+// 12, and iOS's captive-portal webview tends to close itself the moment the
+// network changes. In any of those cases the user still knows where to go.
+#define HANDOFF_MAX 2048
+static void send_handoff_page(httpd_req_t *req, const char *device_name)
+{
+    // Where the reader will be AFTER the reboot - derived from the name just
+    // saved, which is not necessarily the one mDNS is advertising right now.
+    char host[32];
+    wifi_hostname_for(device_name, host, sizeof(host));
+
+    char *page = malloc(HANDOFF_MAX);
+    if (!page) {                       // no room for the nice version; say the essentials
+        httpd_resp_sendstr(req,
+            "<!DOCTYPE html><meta charset='utf-8'>"
+            "<h2>&#9989; Saved</h2><p>The reader is restarting and will join your network.</p>");
+        return;
+    }
+
+    int len = snprintf(page, HANDOFF_MAX,
+        "<!DOCTYPE html><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Saved</title>"
+        "<body style='font-family:system-ui,-apple-system,sans-serif;background:#101018;"
+        "color:#eee;padding:2em;line-height:1.55;max-width:34em;margin:0 auto'>"
+        "<h2>&#9989; Saved</h2>"
+        "<p>The reader is restarting and joining your Wi-Fi network.</p>"
+        "<p id='s' style='color:#ffd54a'><b>Waiting for it to come back&hellip;</b></p>"
+        "<p style='color:#aaa;font-size:.92em'>Your phone should rejoin your home Wi-Fi by "
+        "itself once this setup network disappears. If it does not, switch back by hand "
+        "&mdash; this page keeps looking, and will jump to the reader as soon as it answers.</p>"
+        // Both links are written out here rather than filled in by script: a
+        // captive-portal webview that blocks JS still gets a working way in.
+        "<p style='color:#aaa;font-size:.92em'>You can also just open "
+        "<a href='http://%s.local/' style='color:#ffd54a'>http://%s.local/</a> yourself.</p>"
+        "<p style='margin-top:1.5em'><a href='http://%s.local/' "
+        "style='display:inline-block;background:#ffd54a;color:#101018;padding:.75em 1.3em;"
+        "border-radius:.4em;text-decoration:none;font-weight:600'>Go to MagicMaker &rarr;</a></p>"
+        "<script>"
+        "var h='http://%s.local/',n=0,cur=null;"
+        "function tick(){"
+        "if(++n===15)document.getElementById('s').innerHTML="
+        "'<b>Still waiting.</b> Check that your phone is back on your home Wi-Fi.';"
+        "if(cur)cur.onload=cur.onerror=null;"   // a late reply from a stale probe is noise
+        "cur=new Image();"
+        "cur.onload=function(){location.replace(h);};"
+        "cur.src=h+'favicon.ico?'+n;}"
+        "tick();setInterval(tick,2000);"
+        "</script></body>", host, host, host, host);
+
+    // Truncation would cut the <script> mid-statement and quietly kill the
+    // redirect while the page still looked fine. Say so rather than wonder.
+    if (len >= HANDOFF_MAX) ESP_LOGE(TAG, "handoff page truncated (%d >= %d)", len, HANDOFF_MAX);
+
+    httpd_resp_sendstr(req, page);
+    free(page);
 }
 
 static esp_err_t save_post(httpd_req_t *req)
@@ -361,6 +462,20 @@ static esp_err_t save_post(httpd_req_t *req)
             strncpy(cfg.wifi_password, buf, sizeof(cfg.wifi_password) - 1);
         if (form_get(body, "manif", buf, sizeof(buf)) && buf[0])
             strncpy(cfg.manifest_url, buf, sizeof(cfg.manifest_url) - 1);
+        // Setup-mode only, and deliberately NOT relaxed to the LAN the way
+        // /api/sound was. That endpoint can add a file beside the reward
+        // sounds; this one is a redirect - point it elsewhere and the next
+        // sync rewrites Program/ and cd/ wholesale, in the device's own voice.
+        // Contained blast radius is what earned upload its LAN access, and a
+        // pack URL has none.
+        //
+        // It is the one field here that must be clearable, though: "stop
+        // syncing audio from anywhere" has to be expressible, and an empty box
+        // is how someone would say it.
+        if (form_get(body, "assetu", buf, sizeof(buf))) {
+            strncpy(cfg.assets_url, buf, sizeof(cfg.assets_url) - 1);
+            cfg.assets_url[sizeof(cfg.assets_url) - 1] = '\0';
+        }
     }
     free(body);
 
@@ -374,11 +489,7 @@ static esp_err_t save_post(httpd_req_t *req)
 
     httpd_resp_set_type(req, "text/html");
     if (s_ap_mode) {
-        httpd_resp_sendstr(req,
-            "<!DOCTYPE html><meta charset='utf-8'>"
-            "<body style='font-family:sans-serif;background:#101018;color:#eee;padding:2em'>"
-            "<h2>&#9989; Saved</h2><p>The reader is restarting and will join your "
-            "network. You can close this page.</p></body>");
+        send_handoff_page(req, cfg.device_name);
         xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);   // apply Wi-Fi change
     } else {
         // Normal-mode config change (name / trip date) - no reboot needed.
@@ -575,6 +686,199 @@ static esp_err_t api_band_post(httpd_req_t *req)
     return send_json(req, root);
 }
 
+// POST /api/sound?name=<file>  -> store an uploaded reward sound.
+//
+// Raw octet-stream, deliberately not multipart, so there is no boundary parsing
+// of untrusted input - the same choice webota.c made for firmware.
+//
+// Allowed on the LAN rather than gated to setup mode, because the blast radius
+// is contained instead: a name is a bare filename with no path, so writes can
+// only ever land beside the reward sounds. Program/, cd/ and www/ are
+// unreachable from here, meaning the worst a stranger on the Wi-Fi can do is add
+// a silly noise - not overwrite a voice prompt, the countdown bank, or the page
+// itself. Firmware upload and factory reset stay locked; they are a different
+// risk class.
+#define SND_MAX_BYTES  (1024 * 1024)   // a reward clip is a few seconds; the
+                                       // largest in the bank is ~25 KB
+#define SND_CHUNK      2048
+#define SND_FREE_SLACK (256 * 1024)    // never fill the last of the partition -
+                                       // LittleFS needs room to compact
+
+// A bare filename: letters, digits, dash, underscore, then .mp3 or .wav. No
+// dots elsewhere, so ".." cannot form; no separators, so no directory can be
+// named. Rejecting is much cheaper than sanitising something into safety.
+static bool sound_name_ok(const char *n)
+{
+    size_t len = strlen(n);
+    if (len < 5 || len > 28) return false;
+
+    const char *dot = strrchr(n, '.');
+    if (!dot || dot == n) return false;
+    if (strcasecmp(dot, ".mp3") != 0 && strcasecmp(dot, ".wav") != 0) return false;
+
+    for (const char *p = n; p < dot; p++) {
+        if (*p >= 'a' && *p <= 'z') continue;
+        if (*p >= 'A' && *p <= 'Z') continue;
+        if (*p >= '0' && *p <= '9') continue;
+        if (*p == '-' || *p == '_')  continue;
+        return false;                       // covers '.', '/', '\\' and the rest
+    }
+    return true;
+}
+
+// Enough of a check to reject something that is plainly not audio. A full decode
+// at the door would cost seconds; this catches the common mistakes - a text
+// file, an image, a truncated download - and the decoder still refuses the rest.
+static bool looks_like_audio(const uint8_t *b, int n, const char *name)
+{
+    if (n < 4) return false;
+    const char *dot = strrchr(name, '.');
+    if (dot && strcasecmp(dot, ".wav") == 0)
+        return memcmp(b, "RIFF", 4) == 0;
+    if (memcmp(b, "ID3", 3) == 0) return true;              // tagged MP3
+    return b[0] == 0xFF && (b[1] & 0xE0) == 0xE0;           // bare MPEG sync
+}
+
+static esp_err_t api_sound_post(httpd_req_t *req)
+{
+    char query[96] = { 0 }, name[32] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no name"); return ESP_OK;
+    }
+    url_decode(name);
+    if (!sound_name_ok(name)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+            "name must be letters/digits/-/_ ending .mp3 or .wav, no folders");
+        return ESP_OK;
+    }
+
+    int total = req->content_len;
+    if (total <= 0)             { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty"); return ESP_OK; }
+    if (total > SND_MAX_BYTES)  { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "too big (1 MB max)"); return ESP_OK; }
+
+    size_t fs_total = 0, fs_used = 0;
+    if (esp_littlefs_info("storage", &fs_total, &fs_used) == ESP_OK &&
+        (fs_used + (size_t)total + SND_FREE_SLACK) > fs_total) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not enough free space");
+        return ESP_OK;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/spiffs/%s", name);
+    FILE *f = fopen(path, "wb");
+    if (!f) { httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "cannot open"); return ESP_OK; }
+
+    char *buf = malloc(SND_CHUNK);
+    if (!buf) { fclose(f); unlink(path); httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom"); return ESP_OK; }
+
+    int  remaining = total;
+    bool ok = true, checked = false;
+    while (remaining > 0) {
+        int want = (remaining < SND_CHUNK) ? remaining : SND_CHUNK;
+        int rd = httpd_req_recv(req, buf, want);
+        if (rd == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (rd <= 0) { ok = false; break; }
+        if (!checked) {                       // judge it on the first bytes, so a
+            checked = true;                   // bad file costs one chunk, not 1 MB
+            if (!looks_like_audio((const uint8_t *)buf, rd, name)) { ok = false; break; }
+        }
+        if (fwrite(buf, 1, (size_t)rd, f) != (size_t)rd) { ok = false; break; }
+        remaining -= rd;
+    }
+    free(buf);
+    fclose(f);
+
+    if (!ok) {
+        unlink(path);                         // never leave a half file behind:
+                                              // a truncated clip would be found
+                                              // by discovery and played
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "upload failed or not audio");
+        return ESP_OK;
+    }
+
+    sounds_init();                            // rescan so it appears in the list
+                                              // straight away, no reboot
+    ESP_LOGI(TAG, "sound uploaded: %s (%d bytes)", name, total);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", true);
+    cJSON_AddNumberToObject(root, "bytes", total);
+    cJSON_AddNumberToObject(root, "sounds", sound_count());
+    return send_json(req, root);
+}
+
+// POST /api/sound/delete?name=<file>  -> remove a reward sound.
+//
+// The other half of upload, and it has to exist: a device that can be given a
+// file it cannot be rid of is a device someone needs a USB cable to rescue.
+//
+// Same containment as upload - a bare filename, so only the reward-sound root is
+// reachable and the prompts, the countdown bank and the page cannot be touched.
+// A built-in can be deleted, which is deliberate: "I don't want that one" is a
+// fair thing to want, and a reflash restores it. A band still pointing at a
+// deleted sound simply plays nothing, which is the same outcome as a bank that
+// never had the clip.
+static esp_err_t api_sound_delete(httpd_req_t *req)
+{
+    char query[96] = { 0 }, name[32] = { 0 };
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "name", name, sizeof(name)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no name"); return ESP_OK;
+    }
+    url_decode(name);
+    if (!sound_name_ok(name)) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad name"); return ESP_OK; }
+
+    // The stored name is logical: a clip uploaded as .wav may sit on flash as
+    // the .mp3 the build produced, so try both rather than report a false miss.
+    char path[64];
+    bool gone = false;
+    const char *exts[] = { "", ".mp3", ".wav" };
+    char stem[32];
+    snprintf(stem, sizeof(stem), "%s", name);
+    char *dot = strrchr(stem, '.');
+    if (dot) *dot = '\0';
+    for (int i = 0; i < 3 && !gone; i++) {
+        if (i == 0) snprintf(path, sizeof(path), "/spiffs/%s", name);
+        else        snprintf(path, sizeof(path), "/spiffs/%s%s", stem, exts[i]);
+        if (unlink(path) == 0) gone = true;
+    }
+
+    sounds_init();                            // rescan so the list follows at once
+    ESP_LOGI(TAG, "sound delete %s: %s", name, gone ? "removed" : "not found");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", gone);
+    cJSON_AddNumberToObject(root, "sounds", sound_count());
+    return send_json(req, root);
+}
+
+// POST /api/band/play  (uid) -> behave as though that band had just been tapped.
+//
+// Not a "play this file" endpoint on purpose. It queues the UID for the main
+// loop, so the moment runs where every moment runs and takes the whole path:
+// the scan counter moves, the countdown gates the same way, a third press in a
+// row still earns a cheeky line, and variants rotate. Playing audio straight
+// from this handler would have tested none of that, and would have started a
+// clip from the HTTP task while the LED loop was mid-frame.
+static esp_err_t api_band_play(httpd_req_t *req)
+{
+    char body[128];
+    if (read_body(req, body, sizeof(body)) < 0) return ESP_FAIL;
+
+    char uidhex[24];
+    uint8_t u[4];
+    if (!form_get(body, "uid", uidhex, sizeof(uidhex))) { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "no uid");  return ESP_OK; }
+    if (!hex_to_uid(uidhex, u))                         { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad uid"); return ESP_OK; }
+
+    bool queued = app_play_band(u);
+    ESP_LOGI(TAG, "web play %s: %s", uidhex, queued ? "queued" : "busy");
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddBoolToObject(root, "ok", queued);
+    return send_json(req, root);
+}
+
 // POST /api/band/delete  (uid) -> remove a band (enrollment + name).
 static esp_err_t api_band_delete(httpd_req_t *req)
 {
@@ -608,6 +912,31 @@ static esp_err_t api_reboot(httpd_req_t *req)
 }
 
 // POST /api/countdown/replay (uid) -> let this band play the countdown again today.
+// Change-detection poll. Deliberately tiny: this is the one endpoint that runs
+// every couple of seconds, so it answers "has anything happened?" in ~40 bytes
+// and the page only re-fetches the 500-odd byte band list when the sequence
+// moves. Hand-built rather than cJSON - allocating an object per poll to emit
+// three fields is more work than the answer.
+//
+// `busy` lets the page stay out of the way while a moment is playing. The HTTP
+// task runs at priority 5 against the animation loop's 1, so a poll preempts a
+// show; a few hundred bytes won't be visible, but there's no reason to find out
+// during the one second someone is watching the lights.
+static esp_err_t api_scan(httpd_req_t *req)
+{
+    char last[9];
+    if (!bands_last_scan(last, sizeof(last))) last[0] = '\0';
+
+    char body[96];
+    int n = snprintf(body, sizeof(body), "{\"n\":%u,\"uid\":\"%s\",\"busy\":%s}",
+                     (unsigned)bands_scan_seq(), last,
+                     app_moment_busy() ? "true" : "false");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, body, n);
+}
+
 static esp_err_t api_cd_replay(httpd_req_t *req)
 {
     char body[128];
@@ -712,7 +1041,11 @@ void portal_start(bool ap_mode)
     httpd_uri_t api_bands = { .uri = "/api/bands",        .method = HTTP_GET,  .handler = api_bands_get };
     httpd_uri_t api_save  = { .uri = "/api/band",         .method = HTTP_POST, .handler = api_band_post };
     httpd_uri_t api_del   = { .uri = "/api/band/delete",  .method = HTTP_POST, .handler = api_band_delete };
+    httpd_uri_t api_play  = { .uri = "/api/band/play",    .method = HTTP_POST, .handler = api_band_play };
+    httpd_uri_t api_snd   = { .uri = "/api/sound",        .method = HTTP_POST, .handler = api_sound_post };
+    httpd_uri_t api_snddel= { .uri = "/api/sound/delete", .method = HTTP_POST, .handler = api_sound_delete };
     httpd_uri_t api_rep   = { .uri = "/api/countdown/replay", .method = HTTP_POST, .handler = api_cd_replay };
+    httpd_uri_t api_scan_ = { .uri = "/api/scan",             .method = HTTP_GET,  .handler = api_scan };
     httpd_uri_t api_rbt   = { .uri = "/api/reboot",           .method = HTTP_POST, .handler = api_reboot };
     httpd_register_uri_handler(s_httpd, &root);
     httpd_register_uri_handler(s_httpd, &favicon);
@@ -723,7 +1056,11 @@ void portal_start(bool ap_mode)
     httpd_register_uri_handler(s_httpd, &api_bands);
     httpd_register_uri_handler(s_httpd, &api_save);
     httpd_register_uri_handler(s_httpd, &api_del);
+    httpd_register_uri_handler(s_httpd, &api_play);
+    httpd_register_uri_handler(s_httpd, &api_snd);
+    httpd_register_uri_handler(s_httpd, &api_snddel);
     httpd_register_uri_handler(s_httpd, &api_rep);
+    httpd_register_uri_handler(s_httpd, &api_scan_);
     httpd_register_uri_handler(s_httpd, &api_rbt);
 
     // Upload routes always exist; the gate decides if they do anything. In setup

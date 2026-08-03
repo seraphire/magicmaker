@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 #pragma once
 #include <stdbool.h>
+#include <stddef.h>
 
 // One-time init: netif, default event loop, and the Wi-Fi driver (idle).
 // Safe to call once at boot after NVS is initialised.
@@ -44,3 +45,9 @@ void wifi_start_mdns(const char *instance);
 // The advertised mDNS hostname in use (without ".local") - e.g. "magic" for a
 // device named "magic". Empty string until wifi_start_mdns() has run.
 const char *wifi_hostname(void);
+
+// The hostname a given device name WOULD produce, without advertising it. The
+// setup page needs this to tell the user where to find the reader after the
+// reboot, at a point where the new name is saved but mDNS is still running under
+// the old one (or, in AP mode, not running at all).
+void wifi_hostname_for(const char *instance, char *out, size_t sz);

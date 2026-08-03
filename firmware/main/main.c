@@ -18,6 +18,7 @@
 #include "esp_log.h"
 
 #include "config.h"
+#include "app.h"
 #include "audio.h"
 #include "leds.h"
 #include "trigger.h"
@@ -26,6 +27,7 @@
 #include "sounds.h"
 #include "bands.h"
 #include "ota.h"
+#include "assets.h"      // pack sync runs even when firmware updates are dormant
 #include "countdown.h"
 #if WIFI_ENABLE
 #include "appcfg.h"
@@ -50,6 +52,10 @@ static volatile bool s_online_pending = false; // network task -> loop: play the
 static bool          s_quiet_boot    = false;  // this boot is a silent (manifest-OTA) reboot
 static bool          s_boot_audio    = true;   // owner's "wake up audibly?" preference
 
+// Repeating the setup address to a phone that has joined but not found the page.
+static int     s_visit_said   = 0;   // times said since this phone joined
+static int64_t s_visit_due_us = 0;   // earliest time to say it again
+
 // The assignable sound pool + per-sound animation now live in sounds.c (shared
 // with the web band-manager so the two never drift). These shims keep the rest
 // of this file reading exactly as before.
@@ -68,9 +74,13 @@ static inline anim_id_t anim_for_sound(const char *sound) { return sound_anim(so
 // interrupts. Otherwise a card left sitting there would cut off its own show.
 static uint8_t s_current_uid[4];            // band whose moment is playing
 static uint8_t s_current_len = 0;
-static uint8_t s_pending_uid[4];            // tap that arrived mid-moment
-static uint8_t s_pending_len = 0;
-static bool    s_pending     = false;
+// A tap waiting to be handled: either one that arrived mid-moment, or one the
+// web page injected. Volatile because the HTTP task now writes here too - it
+// publishes the UID first and the flag last, and the main loop reads the flag
+// first, so a half-written UID is never acted on.
+static volatile uint8_t s_pending_uid[4];
+static volatile uint8_t s_pending_len = 0;
+static volatile bool    s_pending     = false;
 
 // Only the main loop owns the reader. leds_play() is also called from the CLI
 // (the `countdown` tester), and polling the RC522 from that task would drive SPI
@@ -89,7 +99,7 @@ static bool moment_interrupted(void)
     if (len >= 4 && s_current_len >= 4 && memcmp(uid, s_current_uid, 4) == 0)
         return false;                       // same band still on the reader
 
-    memcpy(s_pending_uid, uid, len < 4 ? len : 4);
+    for (int i = 0; i < (len < 4 ? len : 4); i++) s_pending_uid[i] = uid[i];
     s_pending_len = len;
     s_pending     = true;
     audio_stop();                           // cut the clip; animation returns next frame
@@ -97,34 +107,73 @@ static bool moment_interrupted(void)
     return true;
 }
 
-// Play a sequence of clips back-to-back (a composed countdown phrase) with one
-// animation over the whole thing. The audio queue streams them with no gap, and
-// audio_is_playing() stays true until the last one ends.
-// True while a moment (sound + show) is on screen. The network task waits for
-// this before its startup update check: a TLS handshake is heavy, this loop
-// runs at priority 1 against its 5, and landing one on top of the other makes
-// the animation stutter.
+// True while a moment (sound + show) is on screen. Heavy work elsewhere waits on
+// it: a TLS handshake at priority 5 landing on this loop's priority 1 stutters
+// the animation, and the web page's poll backs off while it's set. See app.h.
 static volatile bool s_moment_busy = false;
 
 bool app_moment_busy(void) { return s_moment_busy; }
 
+// Queue a tap from the web page. Deliberately the same slot a real mid-moment
+// tap uses, so the show runs on the main loop and takes the identical path -
+// including being interrupted, or interrupting, exactly as a card would.
+bool app_play_band(const uint8_t uid[4])
+{
+    if (s_pending) return false;              // one already waiting; don't stack
+    for (int i = 0; i < 4; i++) s_pending_uid[i] = uid[i];
+    s_pending_len = 4;
+    s_pending     = true;                     // publish last - see the declaration
+    return true;
+}
+
+// Play a sequence of clips back-to-back (a composed countdown phrase) with one
+// animation over the whole thing. The audio queue streams them with no gap, and
+// audio_is_playing() stays true until the last one ends.
 static void celebrate_seq(char paths[][CD_PATH_MAX], int n, anim_id_t anim)
 {
     s_moment_busy = true;
     for (int i = 0; i < n; i++) audio_play(paths[i]);
-    leds_play(anim);
-    for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {
-        if (moment_interrupted()) break;
-        leds_sustain_step(anim);
-        vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+
+    if (anim == ANIM_PULSE) {
+        // Driven by the sound rather than a script: no opening choreography,
+        // just brightness following the voice for as long as it talks. The
+        // level is read here rather than inside leds.c so the LED code stays
+        // independent of the audio engine.
+        leds_pulse_reset();
+        for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {
+            if (moment_interrupted()) break;
+            leds_pulse_step(audio_level(), PULSE_COLOR);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+        }
+    } else {
+        leds_play(anim);
+        for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {
+            if (moment_interrupted()) break;
+            leds_sustain_step(anim);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+        }
     }
-    leds_off();
+    // Eased down rather than cut. A hard clear followed by the idle glow
+    // breathing up from nothing reads as two separate events; the fade lets one
+    // moment end. It's also the join between a band's sound and the countdown
+    // that follows it, so this is what keeps that from being a blink.
+    leds_fade_out();
     s_moment_busy = false;
 }
 
 // Play a sound and run a chosen animation alongside it.
+//
+// The expansion lives here rather than at the call sites so every route into a
+// moment gets it - a band's own sound, a random pick, and the boot greetings -
+// and none can be forgotten later. A stored path is a logical base name, so
+// "/spiffs/chime.wav" plays chime or any chime-N sitting beside it, chosen
+// fresh on each tap. Paths with no variants come back untouched.
 static void celebrate(const char *sound, anim_id_t anim)
 {
+    char pick[CD_PATH_MAX];
+    sound_pick(sound, pick, sizeof(pick));
+    sound = pick;
+
     ESP_LOGI(TAG, "Playing %s", sound);
     s_moment_busy = true;
     audio_play(sound);
@@ -137,7 +186,11 @@ static void celebrate(const char *sound, anim_id_t anim)
         leds_sustain_step(anim);
         vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
     }
-    leds_off();
+    // Eased down rather than cut. A hard clear followed by the idle glow
+    // breathing up from nothing reads as two separate events; the fade lets one
+    // moment end. It's also the join between a band's sound and the countdown
+    // that follows it, so this is what keeps that from being a blink.
+    leds_fade_out();
     s_moment_busy = false;
 }
 
@@ -332,19 +385,49 @@ static bool manifest_configured(const char *url)
 // Fetch the manifest and apply any newer firmware + media. Silent, and safe
 // unattended because a bad image auto-reverts (rollback, ota_mark_valid). Reboots
 // (quietly) if firmware was installed. No-op unless a real manifest host is set.
-static void check_for_updates(const char *why)
+// `verify` asks for the audio pack to be checked against what is really on
+// flash rather than trusting the recorded pack version. True at boot, false on
+// the routine cycle.
+//
+// The version alone can only answer "is this the same manifest?", never "do the
+// files still match it" - so a sound deleted or corrupted on the device is
+// invisible to it, forever. On a reader in someone else's house nobody is going
+// to type `sync-media`, so the only chance to notice is a check the device
+// makes itself. Boot is the right place: reboots are rare, it costs about nine
+// seconds of hashing, and it lets the thing quietly repair itself.
+static void check_for_updates(const char *why, bool verify)
 {
     device_config_t cfg;
     appcfg_load(&cfg);                     // re-read each time: picks up a newly-set URL
-    if (!manifest_configured(cfg.manifest_url)) return;
 
-    bool installed = false;
-    ESP_LOGI(TAG, "%s update check: %s", why, cfg.manifest_url);
-    ota_update_from_manifest(cfg.manifest_url, FW_VERSION, &installed);
-    if (installed) {
-        ESP_LOGW(TAG, "firmware updated (%s) - rebooting (silent)", why);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        esp_restart();                     // quiet_boot was set by the update path
+    if (manifest_configured(cfg.manifest_url)) {
+        bool installed = false;
+        ESP_LOGI(TAG, "%s update check: %s", why, cfg.manifest_url);
+        // Syncs the audio pack too, on its way past.
+        ota_update_from_manifest(cfg.manifest_url, FW_VERSION, &installed, verify);
+        if (installed) {
+            ESP_LOGW(TAG, "firmware updated (%s) - rebooting (silent)", why);
+            vTaskDelay(pdMS_TO_TICKS(300));
+            esp_restart();                 // quiet_boot was set by the update path
+        }
+        return;
+    }
+
+    // Firmware updates are dormant (manifest still the example.com placeholder),
+    // but the audio pack has its OWN on-switch and must not inherit this one.
+    //
+    // These are two separate documents at two separate URLs, with two separate
+    // reasons to be turned on. Leaving the pack behind the firmware gate meant a
+    // device could have assets_url set and a reachable host and still never
+    // sync a thing - the exact configuration a gift ships in, since dormant
+    // firmware updates are the point of that default.
+    if (cfg.assets_url[0]) {
+        int n = 0;
+        ESP_LOGI(TAG, "%s pack check: %s", why, cfg.assets_url);
+        if (assets_sync_pack(cfg.assets_url, FW_VERSION, &n, NULL, verify) != ESP_OK)
+            ESP_LOGW(TAG, "pack sync incomplete - will retry next cycle");
+        else if (n > 0)
+            ESP_LOGI(TAG, "pack: %d file(s) updated", n);
     }
 }
 
@@ -391,14 +474,14 @@ static void network_task(void *arg)
                 for (int i = 0; i < 120 && (s_online_pending || app_moment_busy()); i++)
                     vTaskDelay(pdMS_TO_TICKS(100));
                 vTaskDelay(pdMS_TO_TICKS(500));    // let the last frame land
-                check_for_updates("startup");
+                check_for_updates("startup", true);   // verify the bank while we're here
                 startup_checked = true;
             } else {
                 ESP_LOGI(TAG, "housekeeping: re-sync clock + check updates");
 #if NTP_ENABLE
                 ntp_sync(NTP_SYNC_TIMEOUT_MS);     // correct clock drift
 #endif
-                check_for_updates("periodic");
+                check_for_updates("periodic", false); // routine: trust the pack version
             }
         }
         vTaskDelay(pdMS_TO_TICKS((services_up && startup_checked) ? HOUSEKEEP_PERIOD_MS : 30000));
@@ -424,6 +507,7 @@ void app_main(void)
     }
 
     audio_init();
+    sounds_init();   // needs the data partition, which audio_init() mounts
     leds_init();
     trigger_init();
     s_main_task = xTaskGetCurrentTaskHandle();  // only this task may poll the reader
@@ -456,7 +540,11 @@ void app_main(void)
 #if DEMO_MODE
     // Preview/tune loop: cycle every animation forever, no cards/buttons.
     ESP_LOGI(TAG, "DEMO MODE - cycling animations (set DEMO_MODE 0 for normal use)");
-    static const char *ANIM_NAMES[ANIM_COUNT] = { "CELEBRATE", "WELCOME", "FIREWORKS", "RAINBOW", "ENCHANTED", "BE-OUR-GUEST" };
+    // Sized by ANIM_COUNT, so adding an id without a name here is a compile
+    // error rather than a read off the end.
+    static const char *ANIM_NAMES[ANIM_COUNT] = { "CELEBRATE", "WELCOME", "FIREWORKS",
+                                                  "RAINBOW", "ENCHANTED", "BE-OUR-GUEST",
+                                                  "PULSE" };
     for (;;) {
         for (int a = 0; a < ANIM_COUNT; a++) {
             ESP_LOGI(TAG, ">>> Animation %d: %s", a, ANIM_NAMES[a]);
@@ -494,7 +582,11 @@ void app_main(void)
         if (just_updated) {
             audio_play(PROMPT_UPDATE_DONE);             // "all updated!" after a user install
         } else if (setup_mode) {
-            audio_play(PROMPT_ENTERING_SETUP);          // button held at boot -> "entering setup"
+            // Button held at boot. Same instruction as a first boot, deliberately:
+            // this branch used to say only "entering setup", which left the one
+            // thing the user has to do next - join the setup network - unsaid.
+            // browse-magicmaker.wav only speaks AFTER they've joined it.
+            audio_play(PROMPT_WIFI_SETUP);
         } else if (!provisioned) {
             celebrate(BOOT_SOUND_FIRSTRUN,              // first boot: Walt's dedication...
                       anim_for_sound(BOOT_SOUND_FIRSTRUN));
@@ -525,16 +617,48 @@ void app_main(void)
 
     for (;;) {
 #if WIFI_ENABLE
-        if (s_online_pending) {              // network task joined home Wi-Fi -> "online" moment
-            // Claim before releasing, so the two flags are never both clear.
-            // The network task waits on "pending or busy" before its update
-            // check; clearing pending first leaves a gap where it sees neither.
+        if (s_online_pending) {              // network task joined home Wi-Fi
+            // Spoken, not celebrated. Boot already has a look - the sparkle runs
+            // through the Wi-Fi join - and following it with a full green
+            // celebration made switching on feel like an achievement rather than
+            // a device waking up. The line alone lands better.
+            //
+            // Claim before releasing, so the two flags are never both clear: the
+            // network task waits on "pending or busy" before its update check,
+            // and clearing pending first leaves a gap where it sees neither.
             s_moment_busy    = true;
             s_online_pending = false;
-            celebrate(BOOT_SOUND_OPERATIONAL, anim_for_sound(BOOT_SOUND_OPERATIONAL));
+            audio_play(BOOT_SOUND_OPERATIONAL);
+            // Keep the boot look alive while it speaks. Waiting on a bare delay
+            // froze the strip for the length of the clip - the sparkle didn't
+            // end, it stalled, which looks like the device hanging rather than
+            // talking. Dropping the celebration meant dropping the animation
+            // with it; only the celebration was unwanted.
+            while (audio_is_playing()) {
+                leds_sparkle_step();
+                vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+            }
+            leds_fade_out();          // settle into the idle glow rather than snap
+            s_moment_busy    = false;
         }
-        if (s_setup_mode && wifi_ap_client_joined())   // phone joined the setup AP
-            audio_play(PROMPT_VISIT_SITE);             // "visit the page to continue setup"
+        if (s_setup_mode && wifi_ap_client_joined()) {  // phone joined the setup AP
+            portal_clear_page_seen();                  // this one hasn't found it yet
+            s_visit_said   = 0;
+            s_visit_due_us = 0;                        // speak as soon as audio is free
+        }
+        // Say the address again while nobody has actually opened the page. Not on
+        // a plain timer: portal_page_seen() goes true the moment a browser lays
+        // the page out, so this shuts up on its own the instant they arrive -
+        // whether the captive sheet popped by itself or they typed the IP.
+        // Reciting an address at someone already reading it is worse than silence.
+        if (s_setup_mode && s_visit_said < VISIT_PROMPT_MAX && !portal_page_seen()) {
+            int64_t now = esp_timer_get_time();
+            if (now >= s_visit_due_us && !audio_is_playing()) {
+                audio_play(PROMPT_VISIT_SITE);         // "visit 192.168.4.1 to continue"
+                s_visit_said++;
+                s_visit_due_us = now + (int64_t)VISIT_PROMPT_GAP_MS * 1000;
+            }
+        }
 #endif
 #if PROG_ENABLE
         btn_evt_t be = prog_button_poll();
@@ -615,7 +739,7 @@ void app_main(void)
         // otherwise poll the reader as usual.
         bool tapped;
         if (s_pending) {
-            memcpy(uid, s_pending_uid, 4);
+            for (int i = 0; i < 4; i++) uid[i] = s_pending_uid[i];
             uid_len   = s_pending_len;
             s_pending = false;
             tapped    = true;
@@ -632,20 +756,29 @@ void app_main(void)
             bands_note_scan(uid, uid_len);       // remember it for the web page
 
             // First tap of the day for this band -> the composed countdown
-            // phrase; repeated taps of one band -> a cheeky line. Either one
-            // REPLACES this band's own sound for that tap: the countdown is the
-            // moment, not a preamble to one, and stacking both made the first
-            // tap of the day run ~10 s. Every other tap plays the band's sound
-            // as usual. (No-op if the countdown's off, the clock isn't set, or
-            // this band was already greeted today.)
+            // phrase; repeated taps of one band -> a cheeky line. (No-op if the
+            // countdown's off, the clock isn't set, or this band was already
+            // greeted today.)
             static char cdpaths[CD_MAX_CLIPS][CD_PATH_MAX];
             uint8_t cdanim = ANIM_CELEBRATE;
             int cdn = countdown_due(uid, uid_len, cdpaths, CD_MAX_CLIPS, &cdanim);
-            if (cdn > 0) celebrate_seq(cdpaths, cdn, (anim_id_t)cdanim);
 
-            // Skip the band's sound if the countdown just spoke, or if a new tap
-            // cut it short (go straight to that one instead).
-            if (cdn == 0 && !s_pending) {
+            // The band's own sound comes FIRST, and the countdown follows it -
+            // they no longer replace each other. A band set to "always" used to
+            // never play its own sound at all, which is backwards: the scan is
+            // the thing you chose, and the countdown is an addition to it.
+            //
+            // Two shows rather than one merged sequence, so each keeps its own
+            // animation - a Star Tours band shouldn't turn into the countdown's
+            // colours just because a countdown is due. The fade at the end of
+            // the first is the beat between them; letting them run together
+            // would crash two thoughts into one sentence.
+            //
+            // Cheeky lines are the exception. They're already a reply to tapping
+            // the same band repeatedly, so the band's sound has just played -
+            // saying it again would be the joke stepping on itself.
+            bool cheeky = (cdn > 0 && cdanim == ANIM_PULSE);
+            if (!cheeky && !s_pending) {
                 const char *sound;
                 anim_id_t   anim;
                 if (resolve_tag(uid, uid_len, &sound, &anim, nvsbuf, sizeof(nvsbuf))) {
@@ -665,6 +798,14 @@ void app_main(void)
                     celebrate(sound_path(ridx), anim_for_sound(sound_path(ridx)));
                 }
             }
+
+            // ...then the countdown, as a second thought rather than a
+            // replacement. Skipped if a new tap arrived during the first half -
+            // that tap is what someone is waiting on now, and the countdown will
+            // still be due next time.
+            if (cdn > 0 && !s_pending && !moment_interrupted())
+                celebrate_seq(cdpaths, cdn, (anim_id_t)cdanim);
+
             s_current_len = 0;                          // moment over
             // The re-trigger cooldown is measured from the last read, so a
             // multi-second show outlives it: without this, a card still on the

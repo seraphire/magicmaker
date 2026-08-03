@@ -12,7 +12,7 @@
 #include "esp_err.h"
 
 // Bump when the on-disk shape changes so older saves can be migrated.
-#define APPCFG_VERSION 2
+#define APPCFG_VERSION 3
 
 typedef struct {
     char wifi_ssid[33];      // home network SSID (empty = not provisioned)
@@ -48,6 +48,16 @@ typedef struct {
     bool ring_first;
 
     char manifest_url[129];  // OTA update manifest (editable only in setup mode)
+
+    // Audio pack manifest, PER DEVICE. Empty = no asset sync at all, which is
+    // the default: one reader can carry a birthday set that no other reader and
+    // no public repository ever sees.
+    //
+    // Deliberately separate from manifest_url. That one is public - anything
+    // listed in it is published, and there is no unlisted state - so a voice
+    // bank licensed for personal use only, or a clip recorded for one
+    // particular child, cannot live there.
+    char assets_url[129];
 
     uint32_t config_version;
 } device_config_t;

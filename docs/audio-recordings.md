@@ -6,18 +6,13 @@ against this when recording. Edit freely as features land.
 ## Format
 
 - **Mono, 16-bit PCM WAV.**
-- Keep them short and trim leading/trailing silence — timing between words comes
-  from the clips themselves.
-- **All `cd/` clips at one sample rate.** They're concatenated to build a
-  sentence, and retuning the I2S clock mid-phrase is audible as a tick.
-  Everything else can be whatever suits it.
-- **Don't worry about levels.** Every clip is loudness-matched during the build,
-  which is what lets takes recorded months apart sound like one voice.
-
-Masters live in **`assets/audio-src/`** (`cd/`, `Program/`, and the reward
-sounds at the top level). `tools\build-audio.ps1` encodes them into
-`firmware/spiffs/`, which is **generated** — anything you drop there directly is
-pruned on the next build. See [`audio-roadmap.md`](audio-roadmap.md).
+- **Spoken clips: 16 kHz** (voice needs no more; ~30% smaller than 22050).
+- **Musical stingers / chimes: 22050 Hz** (keep them crisp).
+- Keep them short and trim leading/trailing silence — the silence-keeper in
+  `audio.c` handles gaps.
+- Deployed files live in `firmware/spiffs/` (rewards) and
+  `firmware/spiffs/Program/` (prompts). Source/master takes live in
+  `hardware/audio/`.
 
 ## Status legend
 
@@ -73,21 +68,30 @@ These eight are the tap-reward pool, each mapped to an animation. All ✅.
 
 ## 4. Wi-Fi provisioning voice
 
-Only `wifi-setup.wav` is wired today; the rest are candidates — record the ones
-you want and we flip them on in code. `home` = plays when a join succeeds;
-`not home` = plays when setup/AP mode comes up.
+Three clips carry the whole setup journey, in this order. They deliberately
+don't overlap: the first is about your finger, the second about which network,
+the third about which address.
 
 | File | Line / content | Flag | When |
 |---|---|---|---|
-| `/spiffs/Program/wifi-setup.wav` | "Starting setup. Connect your phone to the MagicMaker Setup network." | ✅ | first-boot setup (after the Walt welcome) |
-| `/spiffs/Program/entering-setup.wav` | "Entering setup." | ✅ | button held through power-on |
-| `/spiffs/Program/release-setup.wav` | "Release the button to enter setup." | ✅ | plays when the hold hits the threshold (ring turns blue) |
-| `/spiffs/Program/browse-magicmaker.wav` | "Visit magicmaker.com on your phone's browser to continue setup." | ✅ | plays when a phone joins the setup AP |
-
-> **SPIFFS gotcha:** object names cap at **32 chars including the `/Program/` path** (9 chars), so keep prompt filenames ≤ 23 chars or `spiffsgen` fails the build.
+| `/spiffs/Program/release-setup.wav` | "Release the button." | ✅ | the hold crosses the threshold and the ring goes solid blue — button still down, no AP yet |
+| `/spiffs/Program/wifi-setup.wav` | "Starting setup. Connect your phone to the Magic Maker network." | ✅ | **both** routes into setup: a first boot with no credentials, and the button held through power-on |
+| `/spiffs/Program/browse-magicmaker.wav` | "If a setup page doesn't open by itself, open your browser and visit 192.168.4.1 to continue." | ✅ | a phone joins the setup AP. Repeats up to 3× (20 s apart) and stops the moment a browser actually renders the page |
 | `/spiffs/Program/wifi-connecting.wav` | "Connecting to Wi-Fi…" | 🔵 planned | at boot while joining (home) |
 | `/spiffs/Program/wifi-online.wav` | "You're online!" | 🔵 planned | at boot, join succeeded (home) |
 | `/spiffs/Program/wifi-failed.wav` | "Couldn't connect — starting setup." | ⚪ legacy | superseded by wifi-trouble (we no longer force setup on a failed join) |
+| `/spiffs/Program/entering-setup.wav` | "Entering setup." | ⚪ retired | said "programming" when it meant Wi-Fi, and only restated `wifi-setup` more vaguely. That branch plays `wifi-setup` now |
+
+Say "Magic Maker network" rather than naming the SSID: the real one is
+`<device-name>-<id>-Setup`, so anything more specific goes stale the moment
+someone renames their reader.
+
+The address is spoken as a bare IP on purpose. It skips DNS, browsers don't
+force HTTPS on IP literals the way they do on domains, and — the one that
+actually matters — a 192.168.4.x address can't get routed out over cellular
+when Android decides the setup network "has no internet".
+
+> **SPIFFS gotcha:** object names cap at **32 chars including the `/Program/` path** (9 chars), so keep prompt filenames ≤ 23 chars or `spiffsgen` fails the build.
 | `/spiffs/Program/wifi-trouble.wav` | "I'm having trouble connecting to Wi-Fi. To change my setup, hold the button while powering me on." | 🔵 **wire-ready** | at boot, provisioned but join failed → stay offline + keep retrying (plays now if the file exists) |
 | `/spiffs/Program/wifi-saved.wav` | "Got it — restarting to connect." | 🔵 planned | after saving creds on the portal page (optional; the page already says this on screen) |
 

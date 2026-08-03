@@ -13,13 +13,27 @@
 #include "esp_log.h"
 #include "cJSON.h"
 #include "mbedtls/sha256.h"
+#include "ota.h"          // ota_http_get - one HTTP fetch helper, not two
+#include "verscmp.h"
 
 static const char *TAG = "assets";
 
 #define MOUNT          "/spiffs"
 #define INSTALLED_PATH MOUNT "/installed.json"
 #define INSTALLED_TMP  MOUNT "/installed.json.new"
-#define MAX_FILES      64                 // sanity cap on a manifest's file list
+// Sanity cap on a manifest's file list. 128 rather than a rounder, smaller
+// number because a complete bank is bigger than it looks: the countdown alone
+// is a clip per number per unit, and the real device already carries 111 files.
+// A cap a full pack can't fit under isn't a safety net, it's a bug.
+#define MAX_FILES      128
+// Pack bookkeeping shares installed.json rather than adding a second state file
+// - one atomic write, one thing to lose. It hangs off a key no file path can
+// take (path_ok rejects it), so it can't collide with a tracked asset.
+#define PACK_KEY       "_pack"
+// A pack manifest carries no firmware section, but it carries every file: at
+// ~105 bytes per compact entry, 128 files is ~13 KB. The buffer is freed before
+// the downloads start, so this doesn't stack with the TLS session.
+#define PACK_MAX       16384
 #define FREE_SLACK     (64 * 1024)        // keep this much FS headroom spare
 
 // --- small helpers ----------------------------------------------------------
@@ -36,6 +50,7 @@ static bool path_ok(const char *p)
     if (!p || !*p || p[0] == '/') return false;
     if (strstr(p, "..")) return false;
     if (strcmp(p, "installed.json") == 0) return false;    // don't let it clobber our state
+    if (strcmp(p, PACK_KEY) == 0) return false;            // reserved: pack state lives under this key
     for (const char *c = p; *c; c++) {
         if (!(isalnum((unsigned char)*c) || *c == '/' || *c == '.' || *c == '-' || *c == '_'))
             return false;
@@ -169,9 +184,43 @@ static esp_err_t download_verify(const char *url, const char *tmp, const char *e
     return ESP_OK;
 }
 
+// Hash a file already on flash. Returns false if it can't be read at all.
+//
+// This is what lets installed.json be a *cache* rather than the only truth.
+// The record and the files can disagree - `idf.py flash` rewrites the storage
+// partition, so a reflash wipes the record while leaving every file intact, and
+// the device would otherwise re-download a bank it already has, byte for byte.
+// The bytes on disk are the fact; the record is just a way to avoid re-reading
+// them.
+static bool file_sha256(const char *fullpath, char out_hex[65])
+{
+    FILE *f = fopen(fullpath, "rb");
+    if (!f) return false;
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+
+    // 512 at a time: this runs on the network task's stack, and the point is to
+    // be cheap enough that checking is never the expensive option.
+    unsigned char buf[512];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        mbedtls_sha256_update(&sha, buf, n);
+
+    bool ok = !ferror(f);
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    fclose(f);
+
+    if (ok) to_hex(digest, 32, out_hex);
+    return ok;
+}
+
 // --- one file --------------------------------------------------------------
 // Returns: 1 = downloaded, 0 = already up to date (skipped), -1 = failed.
-static int sync_one(const char *base_url, cJSON *entry, cJSON *installed)
+static int sync_one(const char *base_url, cJSON *entry, cJSON *installed, bool force)
 {
     cJSON *jp   = cJSON_GetObjectItem(entry, "path");
     cJSON *jsha = cJSON_GetObjectItem(entry, "sha256");
@@ -184,10 +233,37 @@ static int sync_one(const char *base_url, cJSON *entry, cJSON *installed)
     const char *sha  = jsha->valuestring;
     if (!path_ok(path)) { ESP_LOGW(TAG, "unsafe asset path '%s' - skipping", path); return -1; }
 
-    // Already have this exact content?
+    // Already have this exact content, according to the record?
+    //
+    // Under `force` this fast path is skipped entirely, and that is the whole
+    // difference between the two modes. The record can be wrong in BOTH
+    // directions: it can forget files that are present (a reflash wipes it),
+    // and it can remember files that are gone (deleted through the web UI, or
+    // lost to a corrupt filesystem). The version short-circuit alone only
+    // covered the first. Trusting this entry is what made a deleted sound
+    // invisible to a sync run specifically to get it back.
     cJSON *cur = cJSON_GetObjectItem(installed, path);
-    if (cJSON_IsString(cur) && strcasecmp(cur->valuestring, sha) == 0) {
+    if (!force && cJSON_IsString(cur) && strcasecmp(cur->valuestring, sha) == 0) {
         ESP_LOGD(TAG, "up to date: %s", path);
+        return 0;
+    }
+
+    // Ask the disk. The bytes are the fact; the record is only a way to avoid
+    // re-reading them.
+    //
+    // Bounded by construction in the normal case: only files that were *about*
+    // to be downloaded get hashed, so the check costs a local read where the
+    // alternative was a TLS handshake and a transfer. Under `force` every file
+    // is hashed - measured at about five seconds for the full 111-file bank,
+    // against seven minutes to re-download it.
+    char full[192];
+    snprintf(full, sizeof(full), MOUNT "/%s", path);
+    char have_hex[65];
+    if (file_sha256(full, have_hex) && strcasecmp(have_hex, sha) == 0) {
+        if (!cJSON_IsString(cur) || strcasecmp(cur->valuestring, sha) != 0) {
+            ESP_LOGI(TAG, "already on flash, adopting: %s", path);
+            installed_set(installed, path, sha);
+        }
         return 0;
     }
 
@@ -222,18 +298,16 @@ static int sync_one(const char *base_url, cJSON *entry, cJSON *installed)
 }
 
 // --- public: sync the whole "assets" section --------------------------------
-esp_err_t assets_sync_json(const char *manifest_json, int *n_updated)
+// Apply the "assets" section of an already-parsed manifest. Does NOT take
+// ownership of `root` - the caller frees it. Split out so the pack path can
+// drop the raw JSON buffer before the downloads (and their TLS session) begin.
+static esp_err_t sync_root(cJSON *root, int *n_updated, bool force)
 {
     if (n_updated) *n_updated = 0;
 
-    cJSON *root = cJSON_Parse(manifest_json);
-    if (!root) { ESP_LOGW(TAG, "manifest is not valid JSON"); return ESP_FAIL; }
-
     cJSON *assets = cJSON_GetObjectItem(root, "assets");
-    if (!cJSON_IsObject(assets)) {                         // firmware-only manifest: nothing to do
-        cJSON_Delete(root);
+    if (!cJSON_IsObject(assets))                           // firmware-only manifest: nothing to do
         return ESP_OK;
-    }
     cJSON *base  = cJSON_GetObjectItem(assets, "base_url");
     cJSON *files = cJSON_GetObjectItem(assets, "files");
 
@@ -242,7 +316,6 @@ esp_err_t assets_sync_json(const char *manifest_json, int *n_updated)
     int count = cJSON_IsArray(files) ? cJSON_GetArraySize(files) : 0;
     if (count > 0 && !cJSON_IsString(base)) {
         ESP_LOGW(TAG, "assets has files but no base_url");
-        cJSON_Delete(root);
         return ESP_FAIL;
     }
     if (count > MAX_FILES) {
@@ -254,7 +327,7 @@ esp_err_t assets_sync_json(const char *manifest_json, int *n_updated)
     int updated = 0, failed = 0, skipped = 0, removed = 0;
 
     for (int i = 0; i < count; i++) {
-        int r = sync_one(base->valuestring, cJSON_GetArrayItem(files, i), installed);
+        int r = sync_one(base->valuestring, cJSON_GetArrayItem(files, i), installed, force);
         if (r == 1) updated++;
         else if (r == 0) skipped++;
         else failed++;
@@ -283,10 +356,114 @@ esp_err_t assets_sync_json(const char *manifest_json, int *n_updated)
 
     installed_save(installed);
     cJSON_Delete(installed);
-    cJSON_Delete(root);
 
     ESP_LOGI(TAG, "asset sync: %d updated, %d up-to-date, %d removed, %d failed",
              updated, skipped, removed, failed);
     if (n_updated) *n_updated = updated;
     return failed ? ESP_FAIL : ESP_OK;
+}
+
+esp_err_t assets_sync_json(const char *manifest_json, int *n_updated)
+{
+    if (n_updated) *n_updated = 0;
+    cJSON *root = cJSON_Parse(manifest_json);
+    if (!root) { ESP_LOGW(TAG, "manifest is not valid JSON"); return ESP_FAIL; }
+    esp_err_t r = sync_root(root, n_updated, false);
+    cJSON_Delete(root);
+    return r;
+}
+
+// --- audio packs (a manifest of their own, at their own URL) ----------------
+static void pack_state_get(char *url, size_t usz, char *ver, size_t vsz)
+{
+    if (url && usz) url[0] = '\0';
+    if (ver && vsz) ver[0] = '\0';
+
+    cJSON *inst = installed_load();
+    cJSON *p = cJSON_GetObjectItem(inst, PACK_KEY);
+    if (cJSON_IsObject(p)) {
+        cJSON *u = cJSON_GetObjectItem(p, "url");
+        cJSON *v = cJSON_GetObjectItem(p, "version");
+        if (url && usz && cJSON_IsString(u)) { strncpy(url, u->valuestring, usz - 1); url[usz - 1] = '\0'; }
+        if (ver && vsz && cJSON_IsString(v)) { strncpy(ver, v->valuestring, vsz - 1); ver[vsz - 1] = '\0'; }
+    }
+    cJSON_Delete(inst);
+}
+
+// Read-modify-write, deliberately separate from the sync's own save: the file
+// list must be persisted per file (so an interrupted sync resumes), whereas the
+// version may only be claimed once the whole pack landed. Merging the two would
+// mean recording "version 4 applied" partway through applying it.
+static void pack_state_set(const char *url, const char *ver)
+{
+    cJSON *inst = installed_load();
+    cJSON_DeleteItemFromObject(inst, PACK_KEY);
+    cJSON *p = cJSON_CreateObject();
+    cJSON_AddStringToObject(p, "url", url);
+    cJSON_AddStringToObject(p, "version", ver);
+    cJSON_AddItemToObject(inst, PACK_KEY, p);
+    installed_save(inst);
+    cJSON_Delete(inst);
+}
+
+void assets_pack_version(char *out, size_t sz)
+{
+    pack_state_get(NULL, 0, out, sz);
+}
+
+esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
+                           int *n_updated, bool *deferred, bool force)
+{
+    if (n_updated) *n_updated = 0;
+    if (deferred) *deferred = false;
+    if (!url || !url[0]) return ESP_OK;                    // no pack configured: nothing to do
+
+    char *json = malloc(PACK_MAX);
+    if (!json) return ESP_FAIL;
+    int n = ota_http_get(url, json, PACK_MAX);
+    if (n <= 0) { ESP_LOGW(TAG, "pack fetch failed: %s", url); free(json); return ESP_FAIL; }
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);                                            // parsed: the raw text is dead weight
+    json = NULL;
+    if (!root) { ESP_LOGW(TAG, "pack is not valid JSON"); return ESP_FAIL; }
+
+    // Firmware floor. DEFERRED, not failed - see assets.h.
+    cJSON *req = cJSON_GetObjectItem(root, "requires_fw");
+    if (cJSON_IsString(req) && cur_fw && version_cmp(cur_fw, req->valuestring) < 0) {
+        ESP_LOGW(TAG, "pack needs firmware %s (running %s) - skipping until we qualify",
+                 req->valuestring, cur_fw);
+        if (deferred) *deferred = true;
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+
+    // Version short-circuit. Only meaningful paired with the URL it came from,
+    // and only sound when nothing has changed on the device: it says "the
+    // manifest is the same one", not "the files still match it". Skipped under
+    // `force`, so a person who noticed a missing sound gets a real check.
+    char ver[33] = "";
+    cJSON *v = cJSON_GetObjectItem(root, "version");
+    if (cJSON_IsString(v)) {
+        strncpy(ver, v->valuestring, sizeof(ver) - 1);
+        char had_url[129], had_ver[33];
+        pack_state_get(had_url, sizeof(had_url), had_ver, sizeof(had_ver));
+        if (!force && had_ver[0] && strcmp(had_ver, ver) == 0 && strcmp(had_url, url) == 0) {
+            ESP_LOGI(TAG, "pack %s already applied (version %s)", url, ver);
+            cJSON_Delete(root);
+            return ESP_OK;
+        }
+    }
+
+    int updated = 0;
+    esp_err_t r = sync_root(root, &updated, force);
+    cJSON_Delete(root);
+    if (n_updated) *n_updated = updated;
+
+    // Claim the version only on a clean run. A failed file means the next check
+    // must try again rather than short-circuit on a pack it didn't fully apply.
+    if (r == ESP_OK && ver[0]) pack_state_set(url, ver);
+    if (r == ESP_OK) ESP_LOGI(TAG, "pack applied: %s%s%s (%d file(s) downloaded)",
+                              url, ver[0] ? " version " : "", ver, updated);
+    return r;
 }

@@ -1,132 +1,247 @@
-# Audio
+# Audio roadmap
 
-How sound gets from a recording onto the device, what's already done, and what's
-still open.
+Two phases and a set of optimisations.
 
-## The pipeline
+| | Item | Status |
+|---|---|---|
+| **1** | [MP3 encoding](#1-mp3) | next — flash is 84% full |
+| **2** | [Custom audio](#2-custom-audio) | planned, not scheduled |
+| — | [Phrase staging and sound caching](#latency-optimisations) | optional; measure before building |
 
-```
-assets/audio-src/        masters, 16-bit PCM WAV, never modified
-        |
-        |  tools/build-audio.ps1
-        v
-firmware/spiffs/         build output - encoded, levelled, pruned
-        |
-        |  idf.py build   (LittleFS image)
-        v
-storage partition
-```
+Phase 2 is what lets someone who isn't us put audio on a device — a child's name,
+a custom greeting — without rebuilding firmware. It's the reason the resource
+rules below exist: the moment a web page accepts an audio file, size stops being
+something we control.
 
-**`firmware/spiffs` is generated.** Delete the audio in it any time; the script
-puts it back. Only `www/` is real source and is never touched.
+---
 
-```
-tools\build-audio.ps1              # build what changed
-tools\build-audio.ps1 -WhatIf      # show what would happen, touch nothing
-tools\build-audio.ps1 -Force       # rebuild everything
-tools\build-audio.ps1 -NoNormalize # leave levels exactly as recorded
-```
+## The constraint that matters
 
-Clips whose source has been deleted are pruned from the output, so retiring a
-recording is just deleting the master.
+**Flash.** The storage partition is 9.88 MB and we're using 8.3 MB:
 
-### What the script does
+| | size | what |
+|---|---|---|
+| `cd/` | 5.7 MB | 99 countdown clips |
+| `Program/` | 1.6 MB | system prompts |
+| root `*.wav` | 1.0 MB | the 8 assignable reward sounds |
+| `www/` | 56 KB | the config page |
 
-**Encodes to MP3.** 8.1 MB of masters ship as 1.58 MB, taking the storage
-partition from 84% used to 16%.
+At 22 kHz mono 16-bit (44.1 KB/s), **about three minutes of audio is filling 84%
+of the partition.** Every recording session pushes closer to the wall.
 
-**Keeps each file's own sample rate** — except `cd/`, which is pinned. Only
-`cd/` gets concatenated, and retuning the I2S clock mid-sentence is audible as a
-tick, so those clips have to agree with each other. Everything else plays
-standalone and keeps what was recorded; forcing a rate on those only throws away
-bandwidth.
+### Provenance — what may and may not be redistributed
 
-**Loudness-matches everything** to −16 LUFS with a −3 dBTP ceiling (EBU R128,
-two-pass, `linear=true` so it's one constant gain per file — nothing is
-compressed or pumped). This matters more than it sounds:
+This section used to claim the bank was entirely our own content with no third
+party involved. That was never true, and it is the kind of error that only
+surfaces when someone acts on it, so here is the real picture.
 
-- Recordings made months apart, or by different people, otherwise never sit
-  together. Measured spread before this existed: 7.6 LUFS across the prompts,
-  15.7 across the countdown bank.
-- It's worst in `cd/`, where clips are butted together to build one sentence, so
-  a level step lands *between words*.
-- The true-peak ceiling also prevents clipping. A lossy round trip overshoots
-  the original peaks by 2–3 dB on transient speech, so a source sitting at
-  0 dBFS decodes past full scale. Measured on one clean recording: 0 dB in gave
-  728 clipped samples out, −1 dB gave 450, −3 dB gave 1. The usual "leave 1 dB"
-  advice is nowhere near enough.
+| Content | Source | Redistributable? |
+|---|---|---|
+| `cd/` voice, `Program/` prompts | **ElevenLabs, free account** | **No.** Free tier is personal and non-commercial, and anything published from it must credit ElevenLabs in the title. Subscribing later does not fix clips already generated — a paid plan licenses what is made *during* it |
+| `cd/preamble*`, the two music beds | **Gemini, paid account** | Probably. Google does not assert ownership of generated output and paid use is commercial. Confirm which Gemini product, since the clearest wording is in the Workspace/Cloud terms |
+| The 8 root reward sounds | Adafruit guide — park audio | **No.** Third party |
+| `walt-welcome` | A recorded historical speech | **No** |
+| The scripts in `assets/audio-walt` | Written here | **Yes** — and they are the artifact worth publishing |
 
-Peak-matching is **not** a substitute — a dense clip and a transient one can
-share a peak and still be several dB apart to the ear.
+Two consequences worth holding on to:
 
-## Playback
+- The **scripts**, not the audio, are what a fork should receive. They are ours
+  outright, they regenerate the whole bank in minutes on any TTS account, and a
+  forker gets to choose their own voice — which suits a device meant to feel
+  personal better than inheriting ours would.
+- "Google does not claim ownership" is not the same as owning it. Purely
+  AI-generated work is generally not copyrightable in the US, so the music can be
+  distributed but cannot be exclusively licensed. That makes an open pack simpler,
+  not harder — just do not claim rights that are not held.
 
-**WAV and MP3, chosen by sniffing the header, not the extension.** Contributed
-audio is often an MP3 named `.wav`; guessing from the name turns that into
-silence with no explanation.
+Reading published terms, not legal advice. Verify against the accounts actually
+used before relying on any of it.
 
-**The extension in a stored path is a logical name.** `audio_resolve()` falls
-back to the other one, so re-encoding a clip from WAV to MP3 never invalidates a
-path — including ones sitting in NVS against enrolled bands. `sounds.c` can keep
-saying `/spiffs/chime.wav` while the file on disk is `chime.mp3`.
+### Free space isn't just headroom — LittleFS needs it to work
 
-**Decoding is streamed frame by frame**, so RAM use is constant regardless of
-clip length. A three-minute song costs the same as a one-second one.
+Running a copy-on-write filesystem near full degrades it in ways that aren't
+obvious from a capacity number:
 
-### Gapless
+- **Asset OTA needs room for a second copy.** `assets.c` streams to `<name>.new`,
+  verifies the hash, then renames — deliberately, so a failed download can't
+  corrupt a good file. That means replacing a file temporarily needs **both
+  copies resident**. With ~1.58 MB free, any single asset larger than that fails
+  outright. Today's biggest is `be-our-guest.wav` at 320 KB, so it works — but
+  the margin is thinner than it looks, and it's a live constraint on the update
+  path.
+- **Metadata compaction needs free blocks.** LittleFS never overwrites in place;
+  it allocates, then frees. Near full, operations that look like they should fit
+  can return `LFS_ERR_NOSPC` because compaction has nowhere to go.
+- **Wear levelling needs blocks to rotate through.** With few free blocks the
+  same ones get rewritten, wearing flash faster. On a device meant to run for
+  years and take OTA updates, that compounds.
 
-An MP3 doesn't hold a whole number of frames of audio, so the encoder pads it
-either end. A decoder that ignores that plays the padding — a 0.61 s clip comes
-out 0.68 s. Standalone sounds don't care, but the countdown butts clips together
-and 74–102 ms of silence at every join is an audible stutter, about a third of a
-second across a four-part phrase.
+Going from 8.3 MB to ~1.2 MB takes the partition from **16% free to about 88%
+free**, which retires this whole class of problem rather than deferring it.
 
-`play_mp3()` reads the LAME/Xing tag in the first frame, skips `delay + 529`
-samples off the front (529 being the decoder's own pipeline delay), and stops at
-the real sample count so trailing padding never reaches I2S. The tag lives
-*inside* a real frame, so the decoder hands back a frame of silence for it —
-dropped whole rather than counted against the lead-in.
+---
 
-Verified sample-exact rather than by ear: 13450 samples in, 13450 out.
+## 1. MP3
 
-> **Don't check this with `ffprobe`.** It reads the very header the decoder
-> ignores, so it reports 0 ms added either way. Compare decoded sample counts.
+### Standardise `cd/` on 16 kHz mono, ~40 kbps
 
-## Hardware notes
+16 kHz captures to 8 kHz, ample for voice, and allows ~40 kbps where 22 kHz would
+need ~64.
 
-**PSRAM is deliberately off.** Nothing needs it — streamed decoding is
-constant-RAM by construction. Requiring it would narrow the project to
-`R`-suffix modules, and octal PSRAM reserves GPIO 33–37, which is a poor thing
-to spend on RAM you aren't using. If something ever does need it, detect at
-runtime and degrade: `heap_caps_malloc(MALLOC_CAP_SPIRAM)` returning NULL is a
-fine signal.
+| | now | after |
+|---|---|---|
+| `cd/` | 5.7 MB | ~650 KB |
+| `Program/` | 1.6 MB | ~250 KB |
+| reward sounds | 1.0 MB | ~150 KB |
+| **total** | **8.3 MB** | **~1.2 MB** |
 
-**16 MB flash is comfortable, not required.** With audio at ~1.2 MB an 8 MB
-board fits: two 1.75 MB app slots for A/B OTA plus ~4.3 MB of storage. That
-matters more than the free space itself — it's what lets someone build one
-without hunting for a specific module.
+A uniform rate across `cd/` is **required, not an optimisation** — spliced clips
+must share a rate. `firmware/spiffs/README.md` already documents why from the
+other direction: retuning the I2S clock mid-sentence is audible as a tick.
 
-## Still open
+Decoder: `chmorgan/esp-libhelix-mp3` (fixed-point, ~30 KB RAM, proven on ESP32).
 
-**Custom audio from the web page.** Recording a child's name or a personal
-greeting means someone who didn't build the firmware needs to get a clip onto a
-device. There's no upload endpoint today, and a recipient can't rebuild firmware
-— so that missing endpoint *is* the feature.
+**Sniff the header rather than trusting the extension.** Paths in `sounds.c` are
+hardcoded `.wav`; replacing `chime.wav` with MP3 content would otherwise hit the
+RIFF parser and yield silence. This also means a fork can supply either format
+without editing paths.
 
-Band records already store a path string, so a per-band custom clip needs no
-schema change. The obstacle is `sound_path_for_id()`, which validates against
-the known pool specifically so a crafted POST can't inject an arbitrary path;
-widening it to accept an uploads directory has to be done carefully.
+### The gapless problem, and why it isn't one
 
-**Resource rules, required before any upload ships.** Once a form accepts audio,
-size is user-controlled: a name is 1–2 seconds, but the same box accepts a song.
-As decoded PCM a 3-minute song is 5.5 MB at 16 kHz mono and 30 MB at 44.1 kHz
-stereo. Streaming decode already handles that; any *caching* added later must
-stay a pure accelerator — safe to leave empty or disabled with playback still
-working — with a per-item cap so one upload can't swallow the budget.
+MP3 carries encoder/decoder delay and frame padding — roughly 24 ms of silence at
+the head of a decoded file and up to ~50 ms at the tail. The countdown
+*concatenates* clips (`[lead] number unit [trailer]`), so that would inject up to
+~150 ms of stutter into a spoken phrase.
 
-**A filesystem-discovered sound pool.** `sounds.c` holds a compile-time table,
-so adding a sound means editing source and rebuilding. Not needed for a fork
-(you're building from source anyway), and possibly not needed for custom audio
-either — only for uploaded clips to appear as pool entries selectable by *any*
-band.
+The fix is to decode a whole phrase into a buffer and **splice in the PCM
+domain** — trim the 529-sample decoder delay and the padding off each piece and
+butt the samples together. Exact sample alignment, no gaps.
+
+Measured: a realistic phrase is **377 KB PCM (8.7 s)** at 22 kHz; the ceiling with
+`CD_MAX_CLIPS = 6` is **1.08 MB (25 s)**. Less at 16 kHz. PSRAM is 8 MB, so this
+is comfortable — but keep a bounds check, since a long recorded preamble grows
+the buffer, and fall back to sequential playback (today's behaviour, gaps and
+all) if a phrase ever exceeds it.
+
+This is tractable because *we* encode the clips that concatenate. Standalone
+sounds never concatenate, so they don't care.
+
+### While re-encoding
+
+Re-encoding from `assets/countdown/raw/` is the moment to fix the
+trailing-consonant truncation in recording sessions 1–2, and to level-match
+across all four sessions.
+
+### No OTA changes needed
+
+`assets.c` is format-agnostic, and `.gitignore` already excludes `*.mp3`.
+
+---
+
+## Latency optimisations
+
+**Build these only if decode latency is actually perceptible.** Helix runs
+~15–25× realtime, so a single clip is ~100–250 ms and a full phrase ~350–600 ms.
+The LED show fires instantly and may well cover it. Measure first.
+
+### Phrase staging
+
+The next phrase is knowable ahead: trip date + today fixes the tier, number and
+unit. The only free variable is the random lead/trailer — choose it at stage time
+instead of tap time. Same randomness, decided earlier.
+
+**Double-buffer:** hold the old buffer until the new render completes, then swap.
+Interruptible playback makes rapid taps a designed-for case, and the stale buffer
+is still *correct* for the same day — only the lead/trailer repeats.
+
+**Re-render immediately after each play**, not only on day rollover, or every band
+on a given day hears the identical lead and trailer, losing the per-band variety
+we have now. Other invalidation: `countdown_reset_all()` (already the date-change
+hook), and the first render must wait for NTP.
+
+### Sound caching
+
+**Random is always reachable and can't be bounded by registered bands.**
+`main.c:626-638` falls through to a random pick for *any* unknown tag — tap a
+hotel key card and it plays.
+
+At the current 8-sound pool, **cache the whole pool** (~1 MB PCM). Random becomes
+instant with no staging machinery, the existing no-repeat rule
+(`main.c:631-637`) keeps working untouched, and program-mode audition is instant
+too — the one case that would otherwise always eat decode latency.
+
+Warm it at boot in the dead time while Wi-Fi connects and the sparkle runs, so
+the *first* tap is instant. Rebuild on band add/edit/delete and on asset OTA.
+
+---
+
+## 2. Custom audio
+
+The goal: someone who didn't build the firmware records a clip — a child's name,
+a personal greeting — and gets it onto a device from the web page.
+
+Today audio arrives exactly two ways: compiled into the LittleFS image, or asset
+OTA from a manifest. Both are us. There is no upload endpoint
+(`portal.c:704-714`), and a recipient can't rebuild firmware or run
+`release.ps1`. **That missing endpoint is the feature.**
+
+*(Someone forking the project is a different, already-solved case: they supply
+audio at build time, documented in
+[`firmware/spiffs/README.md`](../firmware/spiffs/README.md) for format, layout
+and sourcing, and in the main [README](../README.md) for the file names every
+pool expects.)*
+
+### The data model already fits
+
+Band records store a **path string**, not a pool index — `store_lookup()` returns
+the path and `""` is the random sentinel. So a per-band custom clip
+(`custom/emma.mp3`) needs no schema change.
+
+The blocker is deliberate: `sound_path_for_id()` validates against the known pool
+specifically *"so a crafted POST can't inject an arbitrary path"*. Custom audio
+means widening that to accept paths inside an uploads directory — carefully, as
+it's a real injection guard rather than incidental strictness.
+
+This means per-band custom greetings may not need a filesystem-discovered pool at
+all. An uploads directory and a widened validator could be enough; discovery
+(replacing the compile-time table at `sounds.c:13`) is the larger version, for
+when custom clips should appear as assignable pool entries too.
+
+### Resource rules — required before any upload ships
+
+The moment a form accepts audio, size is user-controlled. A kid's name is 1–2
+seconds; the same box accepts a song. As decoded PCM a 3-minute song is **5.5 MB**
+at 16 kHz mono and **30 MB** at 44.1 kHz stereo, against 8 MB of PSRAM — one
+upload can exceed the entire budget.
+
+- **Streaming decode becomes the baseline** — frame by frame into a ~64 KB ring
+  buffer, constant RAM regardless of length, `s_stop_req` checked at the frame
+  boundary.
+- **Caching becomes a pure accelerator**, safe to leave empty, fill, or disable
+  with playback still working. Never load-bearing.
+- **Per-item cap ~512 KB PCM** (16 s at 16 kHz). Our largest reward sound is
+  ~232 KB at 16 kHz — 2× headroom while excluding songs by construction. Over the
+  cap streams regardless of free budget.
+- **No eviction, no LRU** — with a per-item cap, overflow just means "stream it",
+  a path that has to work anyway.
+- **Surface file size in the upload path**: a 4-minute MP3 at 128 kbps is ~3.8 MB,
+  40% of the partition, reachable with no cache involved.
+- **Validate on upload, not on play** — reject or transcode at the door so a bad
+  file can't be discovered mid-tap.
+
+---
+
+## Loose ends
+
+The setup voice was reworked — see `audio-recordings.md` for the current lines.
+`entering-setup` is retired (it said "programming" when it meant Wi-Fi, and only
+restated `wifi-setup` more vaguely), and `browse-magicmaker` gives a bare IP
+instead of a domain we don't own.
+
+`release-setup` stays as "Release the button." The earlier note here wanted it to
+name the consequence too, but it doesn't need to: the solid blue ring already
+says the hold registered, and `wifi-setup` explains what is happening a second
+later. A longer line would be talking over the thing it was announcing.
+
+Raw takes are archived in `assets/countdown/raw/`. Sessions 1–2 were cut before
+the trailing-consonant truncation was caught, so they want a listening pass.

@@ -75,5 +75,9 @@ esp_err_t ota_install_from_url(const char *url);
 // Full auto-update: fetch the manifest, and only if its version is newer than
 // `cur_version`, download + install its firmware_url. Sets *installed on apply.
 // Returns ESP_OK on success (whether or not an update was applied).
+// `verify_assets` forces the audio pack to be checked against what is actually
+// on flash, instead of trusting the pack version. Pass true where it's cheap
+// and worth it (boot, or a person asking), false on the routine cycle.
 esp_err_t ota_update_from_manifest(const char *manifest_url,
-                                   const char *cur_version, bool *installed);
+                                   const char *cur_version, bool *installed,
+                                   bool verify_assets);

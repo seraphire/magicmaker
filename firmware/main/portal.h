@@ -24,3 +24,18 @@ void portal_start(bool ap_mode);
 
 // Stop both servers (rarely needed; a save reboots instead).
 void portal_stop(void);
+
+// True once a browser has actually RENDERED the setup page, so the spoken
+// "visit 192.168.4.1" prompt knows to stop repeating.
+//
+// Deliberately not "the page was served": in AP mode every URL returns the page
+// (that's what makes the captive sheet pop), so a phone's connectivity probe
+// fetches it within a second of joining - before the human has seen anything. A
+// probe reads the response and stops; only a browser laying the page out goes
+// back for /logo.png. That second request is the one that means someone is
+// looking.
+bool portal_page_seen(void);
+
+// Forget that, so a newly joined phone gets told where to go even if an earlier
+// one already found the page.
+void portal_clear_page_seen(void);

@@ -70,6 +70,7 @@ void appcfg_load(device_config_t *cfg)
     cfg->mickey_leds       = get_i32(h, "led_face", cfg->mickey_leds);
     cfg->ring_first        = get_u8(h, "led_rf", cfg->ring_first);
     get_str(h, "manif", cfg->manifest_url, sizeof(cfg->manifest_url));
+    get_str(h, "assetu", cfg->assets_url, sizeof(cfg->assets_url));
     cfg->config_version    = (uint32_t)get_i32(h, "ver", cfg->config_version);
     nvs_close(h);
 
@@ -99,6 +100,7 @@ esp_err_t appcfg_save(const device_config_t *cfg)
     nvs_set_i32(h, "led_face", cfg->mickey_leds);
     nvs_set_u8(h, "led_rf", cfg->ring_first ? 1 : 0);
     nvs_set_str(h, "manif", cfg->manifest_url);
+    nvs_set_str(h, "assetu", cfg->assets_url);
     nvs_set_i32(h, "ver", (int32_t)APPCFG_VERSION);
 
     r = nvs_commit(h);

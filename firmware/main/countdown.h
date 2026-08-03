@@ -41,6 +41,11 @@
 // the bank is missing the pieces. No gating - used by the CLI tester.
 int countdown_build(int days, char paths[][CD_PATH_MAX], int max, uint8_t *anim_out);
 
+// Pick one cheeky repeat-tap line, ignoring the streak that normally earns it.
+// For testing the line and its pulse without tapping a band five times.
+// Returns the clip count (1) or 0 if the pool is empty.
+int countdown_cheeky(char paths[][CD_PATH_MAX], int max);
+
 // The full per-tap decision. Returns the number of clips to play (0 = nothing):
 //   - repeated taps of the same band -> a random cheeky line
 //   - otherwise, once per day per band (or per the band's mode) -> the countdown

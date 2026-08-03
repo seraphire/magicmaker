@@ -46,12 +46,17 @@ void bands_sanitize_name(char *s)
     }
 }
 
+static volatile uint8_t s_scan_seq = 0;
+
 void bands_note_scan(const uint8_t *uid, uint8_t len)
 {
     if (len < 4) return;                 // the button has no UID
     uid_hex(uid, s_last);
     s_have_last = true;
+    s_scan_seq++;                        // wraps, and that's fine - see bands.h
 }
+
+uint8_t bands_scan_seq(void) { return s_scan_seq; }
 
 bool bands_last_scan(char *out, size_t sz)
 {

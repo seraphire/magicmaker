@@ -96,6 +96,11 @@
 // so what you see over serial matches what a real tap does.
 #define FRAME_DELAY_MS      20
 
+// Colour of the audio-reactive pulse used for the cheeky repeat-tap lines.
+// Warm amber: playful rather than ceremonial, and clearly not one of the
+// celebration colours, so a repeat tap reads as an aside at a glance.
+#define PULSE_COLOR         0xFFB030
+
 #define LED_BRIGHTNESS      120
 
 // Demo mode: 1 = ignore cards/buttons and just cycle every animation in a loop
@@ -154,14 +159,24 @@
 #define PROMPT_ALLDONE   "/spiffs/Program/all-done.wav"     // exiting program mode
 #define PROMPT_TRYAGAIN  "/spiffs/Program/try-again.wav"    // read failed
 #define PROMPT_RANDOM    "/spiffs/Program/random.wav"       // "this card is now a surprise"
+// Plays for BOTH ways into setup: a first boot with no credentials, and the
+// button-held-at-boot recovery. One instruction, one recording, so the two paths
+// sound like the same device. (entering-setup.wav is retired - it said
+// "programming", and only restated this more vaguely.)
 #define PROMPT_WIFI_SETUP "/spiffs/Program/wifi-setup.wav"  // "starting setup, connect your phone..."
-#define PROMPT_ENTERING_SETUP "/spiffs/Program/entering-setup.wav" // button-held-at-boot recovery
 #define PROMPT_WIFI_FAILED "/spiffs/Program/wifi-failed.wav" // "couldn't connect - starting setup" (legacy)
 // Provisioned but can't connect right now: we stay usable offline and keep
 // retrying (see provision()). Tell them how to redo setup on purpose.
 #define PROMPT_WIFI_TROUBLE "/spiffs/Program/wifi-trouble.wav" // "trouble connecting - hold the button while powering on to change setup"
 #define PROMPT_RELEASE_SETUP "/spiffs/Program/release-setup.wav"  // "release the button..."
-#define PROMPT_VISIT_SITE "/spiffs/Program/browse-magicmaker.wav" // "visit magicmaker.com..."
+#define PROMPT_VISIT_SITE "/spiffs/Program/browse-magicmaker.wav" // "visit 192.168.4.1..."
+
+// The address prompt repeats while nobody has actually opened the page (see
+// portal_page_seen). Three times across ~40 s, then silence - if that hasn't
+// landed it, more talking won't. The gap is measured from the start of the clip
+// (~10 s), so it's about ten seconds of quiet between takes.
+#define VISIT_PROMPT_MAX     3
+#define VISIT_PROMPT_GAP_MS  20000
 
 // OTA voice. update-start/failed play only for *user-initiated* installs (web
 // upload, ota-url); update-done plays on the next boot after one. Manifest-
@@ -225,7 +240,7 @@
 #define OTA_TEST_URL         "https://example.com/"
 
 // Running firmware version (bump per release; compared against the manifest).
-#define FW_VERSION           "1.0.4"
+#define FW_VERSION           "1.2.0"
 // Where the update manifest lives (override per-fetch with: update-check <url>).
 #define OTA_MANIFEST_URL     "https://example.com/manifest.json"
 

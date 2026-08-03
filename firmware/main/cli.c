@@ -21,6 +21,7 @@
 #include "ntp.h"
 #include "ota.h"
 #include "assets.h"
+#include "app.h"          // app_moment_busy - don't start TLS mid-show
 #include "countdown.h"
 #include "leds.h"
 #include "verscmp.h"
@@ -135,7 +136,8 @@ static int cmd_update_now(int argc, char **argv)
 #endif
     bool installed = false;
     printf("Checking %s ...\n", url);
-    if (ota_update_from_manifest(url, FW_VERSION, &installed) != ESP_OK) {
+    // A person asked, so verify the bank rather than trusting the pack version.
+    if (ota_update_from_manifest(url, FW_VERSION, &installed, true) != ESP_OK) {
         printf("update failed (see log).\n");
         return 1;
     }
@@ -149,51 +151,159 @@ static int cmd_update_now(int argc, char **argv)
     return 0;
 }
 
+// Show or set the audio pack URL.
+//
+// The web form for this is setup-mode only, because over the LAN a pack URL is
+// a redirect: point it elsewhere and the next sync rewrites Program/ and cd/ in
+// the device's own voice. The serial console is a different proposition - it
+// needs a USB cable in the socket, which is the same "you are holding it"
+// evidence the button provides, and strictly stronger than being on the Wi-Fi.
+// So this is the same gate, not a hole in it.
+//
+// `assets-url none` clears it. Clearing has to be expressible: "stop syncing
+// audio from anywhere" is a thing someone will want to say, and an argument
+// that can't be empty needs a word for it.
+static int cmd_assets_url(int argc, char **argv)
+{
+    device_config_t cfg;
+    appcfg_load(&cfg);
+
+    if (argc < 2) {
+        printf("Audio pack URL: %s\n", cfg.assets_url[0] ? cfg.assets_url : "(none)");
+        char ver[33];
+        assets_pack_version(ver, sizeof(ver));
+        if (ver[0]) printf("Applied pack  : %s\n", ver);
+        printf("Set with: assets-url <url>   (or 'assets-url none' to clear)\n");
+        return 0;
+    }
+
+    const char *url = argv[1];
+
+    if (strcmp(url, "none") == 0 || strcmp(url, "off") == 0) {
+        cfg.assets_url[0] = '\0';
+        if (appcfg_save(&cfg) != ESP_OK) { printf("Save failed.\n"); return 1; }
+        printf("Audio pack URL cleared - no asset sync will run.\n");
+        return 0;
+    }
+
+    if (strncmp(url, "https://", 8) != 0 && strncmp(url, "http://", 7) != 0) {
+        printf("Refusing '%s' - must start with https:// or http://\n", url);
+        return 1;
+    }
+    if (strlen(url) >= sizeof(cfg.assets_url)) {
+        printf("Too long (%u chars, max %u).\n",
+               (unsigned)strlen(url), (unsigned)sizeof(cfg.assets_url) - 1);
+        return 1;
+    }
+
+    strncpy(cfg.assets_url, url, sizeof(cfg.assets_url) - 1);
+    cfg.assets_url[sizeof(cfg.assets_url) - 1] = '\0';
+    if (appcfg_save(&cfg) != ESP_OK) { printf("Save failed.\n"); return 1; }
+
+    printf("Audio pack URL set to %s\n", cfg.assets_url);
+    printf("Run 'sync-media' to fetch it now.\n");
+    return 0;
+}
+
 // Sync just the media/web assets to the manifest (no firmware, no reboot). Handy
 // for testing asset OTA on its own; new sounds are usable on the next tap.
 static int cmd_sync_media(int argc, char **argv)
 {
     device_config_t cfg;
     appcfg_load(&cfg);
-    const char *url = (argc > 1) ? argv[1] : cfg.manifest_url;
 #if WIFI_ENABLE
     if (!wifi_is_connected()) { printf("Not connected to Wi-Fi.\n"); return 1; }
 #endif
-    char *json = malloc(8192);
-    if (!json) { printf("out of memory\n"); return 1; }
-    printf("Fetching %s ...\n", url);
-    int n = ota_http_get(url, json, 8192);
-    if (n <= 0) { printf("manifest fetch failed (see log).\n"); free(json); return 1; }
+    // With no argument, prefer the device's own audio pack - once one is
+    // configured that's where media actually comes from. Falls back to the
+    // firmware manifest, which is where assets lived before packs existed.
+    const char *url = (argc > 1) ? argv[1]
+                    : (cfg.assets_url[0] ? cfg.assets_url : cfg.manifest_url);
 
+    // Always through the pack path: it applies the same asset section either
+    // way, and simply finds no "requires_fw"/"version" in a plain manifest.
+    // Don't trample a moment. A TLS handshake runs far above the animation and
+    // audio loop, so starting one mid-show cuts the sound off in the middle of
+    // a word. The scheduled update path already waits for this; typing
+    // `sync-media` a few seconds after boot lands squarely on the greeting.
+    if (app_moment_busy()) {
+        printf("Waiting for the current sound to finish...\n");
+        while (app_moment_busy()) vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // force=true: a person asked. The version short-circuit only knows whether
+    // the manifest changed, not whether the files still match it - so a sound
+    // deleted on the device would otherwise get a cached "already applied".
     int updated = 0;
-    esp_err_t r = assets_sync_json(json, &updated);
-    free(json);
-    printf("media sync: %d file(s) downloaded, %s\n",
-           updated, (r == ESP_OK) ? "all verified" : "some failed (see log)");
+    bool deferred = false;
+    printf("Fetching %s ...\n", url);
+    esp_err_t r = assets_sync_pack(url, FW_VERSION, &updated, &deferred, true);
+
+    if (deferred) {
+        printf("media sync: DEFERRED - this pack needs newer firmware (running %s).\n", FW_VERSION);
+        return 0;
+    }
+    char ver[33];
+    assets_pack_version(ver, sizeof(ver));
+    printf("media sync: %d file(s) downloaded, %s", updated,
+           (r == ESP_OK) ? "all verified" : "some failed (see log)");
+    if (ver[0]) printf(" (pack version %s)", ver);
+    printf("\n");
     return (r == ESP_OK) ? 0 : 1;
 }
 
-// Run an animation and then hold its sustain look until the audio finishes, the
-// way a real tap does (main.c celebrate_seq). Without the hold, an animation
-// ends the moment its choreography does while the phrase plays on - which is
-// not what the device actually does. Keeping the CLI honest matters: a test
-// path that behaves differently from the real one is how the LED refresh race
-// stayed hidden.
-static void cli_show(anim_id_t anim)
+// The show itself. Caller holds the strip.
+//
+// It's held across the animation AND the sustain that follows: leds_play()
+// locks itself, but releasing between the two lets the main loop's idle step
+// slip in between sustain frames, and the strip then alternates between the
+// sustain look and idle blue - a flicker starting exactly when the animation
+// ends. Doesn't arise on a real tap, where the main loop is the one running the
+// show and nothing else is painting.
+static void cli_show_locked(anim_id_t anim)
 {
-    // Held across the animation AND the sustain that follows it. leds_play()
-    // locks itself, but releasing between the two lets the main loop's idle step
-    // slip in between sustain frames - the strip then alternates between the
-    // sustain look and idle blue, which is a visible flicker that starts exactly
-    // when the animation ends. Doesn't arise on a real tap, where the main loop
-    // is the one running the show and nothing else is painting.
-    leds_acquire();
-    leds_play(anim);
-    for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {   // ~30 s cap
-        leds_sustain_step(anim);
-        vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+    if (anim == ANIM_PULSE) {                    // audio-reactive, no choreography
+        leds_pulse_reset();
+        // Summarise what the level actually did. A pulse that never moves looks
+        // like a solid colour, and that's indistinguishable from "working" until
+        // you're standing in front of it - so print the spread and let the
+        // numbers say whether it's tracking the voice.
+        int lo = 255, hi = 0, frames = 0; long sum = 0;
+        for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {
+            uint8_t lvl = audio_level();
+            if (lvl < lo) lo = lvl;
+            if (lvl > hi) hi = lvl;
+            sum += lvl; frames++;
+            leds_pulse_step(lvl, PULSE_COLOR);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+        }
+        if (frames)
+            printf("pulse: %d frames, level %d..%d (mean %ld)\n",
+                   frames, lo, hi, sum / frames);
+    } else {
+        leds_play(anim);
+        for (int guard = 0; audio_is_playing() && guard < 1500; guard++) {   // ~30 s cap
+            leds_sustain_step(anim);
+            vTaskDelay(pdMS_TO_TICKS(FRAME_DELAY_MS));
+        }
     }
-    leds_off();
+    leds_fade_out();          // same ending a real tap gets
+}
+
+// Queue a clip list and show it, the way a real tap does (main.c
+// celebrate_seq). Keeping the CLI honest matters: a test path that behaves
+// differently from the real one is how the LED refresh race stayed hidden.
+//
+// The strip is claimed BEFORE the audio is queued. The other order - play, then
+// wait for the strip - means that if something else is holding it (the boot
+// celebration, say) the sound plays out over the wrong animation and this one
+// never runs at all. Observed exactly that: a cheeky line spoken over the green
+// "operational" show, with no pulse.
+static void cli_show_seq(char paths[][CD_PATH_MAX], int n, anim_id_t anim)
+{
+    leds_acquire();
+    for (int i = 0; i < n; i++) audio_play(paths[i]);
+    cli_show_locked(anim);
     leds_release();
 }
 
@@ -215,10 +325,14 @@ static int cmd_countdown(int argc, char **argv)
         int n = countdown_due(uid, ulen, paths, CD_MAX_CLIPS, &anim);
         if (n > 0) {
             printf("due: FIRED -> %d clip(s)\n", n);
-            for (int i = 0; i < n; i++) { printf("   %s\n", paths[i]); audio_play(paths[i]); }
-            cli_show((anim_id_t)anim);
+            for (int i = 0; i < n; i++) printf("   %s\n", paths[i]);
+            cli_show_seq(paths, n, (anim_id_t)anim);
         } else {
-            printf("due: not due (countdown off / no clock / already greeted today)\n");
+            printf("due: not due - countdown off, no clock, already greeted today,\n"
+                   "     this band set to Off, or the taper is skipping today.\n"
+                   "     %d day(s) out; taper only speaks occasionally this far from\n"
+                   "     the trip. 'Again today' on the web page forces the next tap.\n",
+                   countdown_days_remaining());
         }
         return 0;
     }
@@ -234,8 +348,7 @@ static int cmd_countdown(int argc, char **argv)
         }
         printf("%d day(s) -> tier '%s' -> %d clip(s):\n", days, countdown_tier_name(days), n);
         for (int i = 0; i < n; i++) printf("   %s\n", paths[i]);
-        for (int i = 0; i < n; i++) audio_play(paths[i]);
-        cli_show((anim_id_t)anim);
+        cli_show_seq(paths, n, (anim_id_t)anim);
         return 0;
     }
     int d = countdown_days_remaining();
@@ -373,6 +486,19 @@ static int cmd_status(int argc, char **argv)
     return 0;
 }
 
+// Fire a cheeky line with its audio-reactive pulse, without having to tap the
+// same band five times to earn one.
+static int cmd_cheeky(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    char paths[CD_MAX_CLIPS][CD_PATH_MAX];
+    int n = countdown_cheeky(paths, CD_MAX_CLIPS);
+    if (n <= 0) { printf("no cheeky clips in /spiffs/cd/\n"); return 1; }
+    printf("cheeky: %s\n", paths[0]);
+    cli_show_seq(paths, n, ANIM_PULSE);
+    return 0;
+}
+
 // Play one file through the normal audio path, so a clip can be checked without
 // enrolling a band or reaching for the reader. Decoder is chosen by sniffing the
 // file, so this exercises exactly what a tap would.
@@ -435,6 +561,11 @@ void cli_start(void)
         .help    = "Show device id, Wi-Fi state, time, and free heap",
         .func    = &cmd_status,
     };
+    const esp_console_cmd_t cheeky_cmd = {
+        .command = "cheeky",
+        .help    = "Play a random cheeky line with its audio-reactive pulse",
+        .func    = &cmd_cheeky,
+    };
     const esp_console_cmd_t play_cmd = {
         .command = "play",
         .help    = "Play an audio file: play /spiffs/chime.wav",
@@ -466,6 +597,12 @@ void cli_start(void)
         .help    = "Sync media/web assets to the manifest (no firmware, no reboot)",
         .func    = &cmd_sync_media,
     };
+    const esp_console_cmd_t assetsurl_cmd = {
+        .command = "assets-url",
+        .help    = "Show or set the audio pack URL ('assets-url none' clears it)",
+        .hint    = "[<url>|none]",
+        .func    = &cmd_assets_url,
+    };
     const esp_console_cmd_t countdown_cmd = {
         .command = "countdown",
         .help    = "Days to the trip; 'countdown <days>' force-plays that tier",
@@ -493,11 +630,13 @@ void cli_start(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&time_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&status_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&play_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&cheeky_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&fetch_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&update_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&otaurl_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&updatenow_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&syncmedia_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&assetsurl_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&countdown_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&selftest_cmd));
 #if WIFI_ENABLE

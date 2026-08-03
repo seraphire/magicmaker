@@ -9,6 +9,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Mounts SPIFFS, sets up I2S, and starts the audio task. Call once at boot.
 void audio_init(void);
@@ -32,6 +33,13 @@ bool audio_resolve(const char *path, char *out, size_t out_sz);
 
 // True from the moment audio_play() is called until the file finishes.
 bool audio_is_playing(void);
+
+// Loudness of what's coming out right now, 0-255, for driving LEDs from the
+// sound. This is a peak-hold that decays a little on every read, so it tracks
+// the rhythm of a voice rather than the waveform - poll it once per animation
+// frame. Raw sample amplitude would strobe; syllables are what you want to see.
+// Reads as 0 when nothing is playing.
+uint8_t audio_level(void);
 
 // Cut the current clip short and drop anything queued behind it. The streaming
 // loops check this between buffer writes, so a long clip stops promptly instead

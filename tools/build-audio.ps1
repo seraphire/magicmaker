@@ -128,7 +128,25 @@ function MeasureLoudness($path) {
   $out  = & $FFmpeg -hide_banner -i $path -af $filt -f null - 2>&1 | Out-String
   $m = [regex]::Match($out, '\{[^{}]*"input_i"[\s\S]*?\}')
   if (-not $m.Success) { return $null }
-  try { return $m.Value | ConvertFrom-Json } catch { return $null }
+  try { $j = $m.Value | ConvertFrom-Json } catch { return $null }
+  # A clip shorter than R128's 400 ms gating block has no block that passes the
+  # gate, so integrated loudness comes back -inf. Feeding that to pass 2 makes
+  # ffmpeg refuse the file outright ("Result too large") and the build dies on a
+  # word like "and". Report the failure instead and let the caller fall back.
+  if ([double]::TryParse($j.input_i, [ref]$null) -eq $false) { return $null }
+  return $j
+}
+
+# Fallback for clips R128 cannot measure: match plain RMS instead. Coarser than
+# loudness matching, but these are single words spliced between clips from the
+# same session, so they start out close and only need nudging. Target is where
+# loudnorm actually lands this material (measured: -16.4 to -17.6 dB).
+$RMS_TARGET = -16.5
+function MeasureRms($path) {
+  $out = & $FFmpeg -hide_banner -i $path -af volumedetect -f null - 2>&1 | Out-String
+  $m = [regex]::Match($out, 'mean_volume:\s*(-?[\d.]+) dB')
+  if (-not $m.Success) { return $null }
+  return [double]$m.Groups[1].Value
 }
 
 # Pass 2 filter string. linear=true means one gain for the whole file - no
@@ -188,7 +206,20 @@ foreach ($f in $srcFiles) {
   if (-not $NoNormalize) {
     $meas = MeasureLoudness $f.FullName
     if ($meas) { $filter = LoudnormFilter $meas; $lufsBefore = $meas.input_i }
-    else { Write-Warning "$rel : loudness measurement failed; level left as recorded" }
+    else {
+      # Too short for R128 (a one-word clip), or genuinely unmeasurable. Match
+      # RMS rather than give up - a fragment left at its raw level stands out
+      # badly precisely because it sits mid-sentence between normalised clips.
+      $rms = MeasureRms $f.FullName
+      if ($rms -ne $null) {
+        $gain  = [math]::Round($RMS_TARGET - $rms, 2)
+        $filter = "volume=$($gain)dB,alimiter=limit=$([math]::Pow(10, $LOUD_TP / 20.0))"
+        Write-Host ("  {0}: too short to gauge loudness; RMS {1} dB -> {2} ({3:+0.0;-0.0} dB)" -f `
+                    $rel, $rms, $RMS_TARGET, $gain) -ForegroundColor DarkGray
+      } else {
+        Write-Warning "$rel : loudness measurement failed; level left as recorded"
+      }
+    }
   }
 
   # --- pass 2: apply, and encode or write straight back out ----------------

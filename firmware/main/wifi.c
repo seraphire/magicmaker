@@ -187,6 +187,37 @@ const char *wifi_device_id(void)
     return id;
 }
 
+// Hostname follows the device name so "<name>.local" is memorable. Sanitize to
+// a valid mDNS label: lower-case, only [a-z0-9-], spaces/underscores -> '-', no
+// doubled or trailing hyphens. If the name is empty or still the generic default
+// ("magicmaker"), fall back to the per-device "magicmaker-<id>" so two unnamed
+// units can't collide on the network.
+//
+// Separate from wifi_start_mdns() because the setup page needs to answer "where
+// will this device be after it reboots?" - a question about a name that has been
+// saved but not yet applied.
+void wifi_hostname_for(const char *instance, char *out, size_t sz)
+{
+    if (!out || sz == 0) return;
+    int n = 0;
+    char prev = '-';
+    for (const char *p = instance ? instance : ""; *p && n < (int)sz - 1; p++) {
+        char c = (char)tolower((unsigned char)*p);
+        if (c == '.') break;                         // a hostname is one label; stop
+                                                     // at the first dot (e.g. drop ".local")
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out[n++] = c; prev = c;
+        } else if ((c == ' ' || c == '-' || c == '_') && prev != '-' && n > 0) {
+            out[n++] = '-'; prev = '-';
+        }
+    }
+    while (n > 0 && out[n - 1] == '-') n--;         // strip trailing hyphen
+    out[n] = '\0';
+
+    if (n == 0 || strcmp(out, "magicmaker") == 0)   // unnamed / default -> unique
+        snprintf(out, sz, "magicmaker-%s", wifi_device_id());
+}
+
 void wifi_start_mdns(const char *instance)
 {
     static bool started = false;
@@ -195,29 +226,8 @@ void wifi_start_mdns(const char *instance)
         started = true;
     }
 
-    // Hostname follows the device name so "<name>.local" is memorable. Sanitize
-    // to a valid mDNS label: lower-case, only [a-z0-9-], spaces/underscores ->
-    // '-', no doubled or trailing hyphens. If the name is empty or still the
-    // generic default ("magicmaker"), fall back to the per-device
-    // "magicmaker-<id>" so two unnamed units can't collide on the network.
     char host[32];
-    int n = 0;
-    char prev = '-';
-    for (const char *p = instance ? instance : ""; *p && n < (int)sizeof(host) - 1; p++) {
-        char c = (char)tolower((unsigned char)*p);
-        if (c == '.') break;                         // a hostname is one label; stop
-                                                     // at the first dot (e.g. drop ".local")
-        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-            host[n++] = c; prev = c;
-        } else if ((c == ' ' || c == '-' || c == '_') && prev != '-' && n > 0) {
-            host[n++] = '-'; prev = '-';
-        }
-    }
-    while (n > 0 && host[n - 1] == '-') n--;        // strip trailing hyphen
-    host[n] = '\0';
-
-    if (n == 0 || strcmp(host, "magicmaker") == 0)  // unnamed / default -> unique
-        snprintf(host, sizeof(host), "magicmaker-%s", wifi_device_id());
+    wifi_hostname_for(instance, host, sizeof(host));
 
     strncpy(s_mdns_host, host, sizeof(s_mdns_host) - 1);   // remember for wifi_hostname()
     s_mdns_host[sizeof(s_mdns_host) - 1] = '\0';

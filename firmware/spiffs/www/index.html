@@ -70,6 +70,17 @@ padding:.7em;color:var(--noteFg);font-size:.9em;}
 padding:.6em .7em;margin-top:.7em;font-size:.9em;color:var(--muted);}
 .status b{color:var(--fg);} .status .ok{color:var(--ok);}
 a,.lnk{color:var(--accentText);}
+/* Device state. Only rendered when there's something to say - a permanent
+   "everything is fine" bar is noise you stop reading. */
+#devstate{display:none;margin:.7em 0 0;padding:.5em .7em;border-radius:.4em;
+font-size:.9em;border:1px solid transparent;}
+#devstate.on{display:block;}
+#devstate.busy{background:var(--noteBg);border-color:var(--noteLine);color:var(--noteFg);}
+#devstate.off{background:var(--dangBg);border-color:var(--dangBg);color:var(--dangFg);}
+#devstate .dot{display:inline-block;width:.55em;height:.55em;border-radius:50%;
+margin-right:.45em;vertical-align:baseline;background:currentColor;}
+#devstate.busy .dot{animation:pulse 1.1s ease-in-out infinite;}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 /* --- tabs ------------------------------------------------------------- */
 nav.tabs{display:flex;gap:.25em;margin:.8em 0 .2em;border-bottom:1px solid var(--line);
 overflow-x:auto;}
@@ -114,6 +125,8 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
   </div>
   <button type="button" id="themeBtn" title="Light / dark">&#9681;</button>
 </header>
+
+<div id="devstate"></div>
 
 <nav class="tabs" id="tabs">
   <button type="button" data-tab="trip"  aria-selected="true">Trip</button>
@@ -267,11 +280,41 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
         +'<div class="bs">'+esc(lbl(b.sound))+'</div>'
         +'<div class="cd">Countdown: '+modeLabel(b.cdmode)+'</div>'
         +'<div class="uid">'+esc(b.uid)+'</div>'
+        +'<button type="button" class="play">&#9654; Play</button>'
         +'<button type="button" class="edit">Edit</button>'
         +'<button type="button" class="rep">Again today</button>'
         +'<button type="button" class="del">Delete</button>';
+      // Tap this band without the card. The device queues it for the tap loop,
+      // so it runs the whole path - countdown gating, cheeky on a third press,
+      // variant choice - rather than just playing a file.
+      c.querySelector('.play').onclick=function(e){
+        var btn=e.target, was=btn.innerHTML;
+        btn.disabled=true; btn.textContent='…';
+        post('/api/band/play',{uid:b.uid}).then(function(r){
+          // ok:false means a tap was already queued, which is the device being
+          // busy rather than an error - say so plainly.
+          btn.textContent=(r&&r.ok===false)?'busy':'playing';
+          setTimeout(function(){ btn.innerHTML=was; btn.disabled=false; },2000);
+        }).catch(function(){
+          btn.textContent='failed';
+          setTimeout(function(){ btn.innerHTML=was; btn.disabled=false; },2000);
+        });
+      };
       c.querySelector('.del').onclick=function(){ if(confirm('Delete band "'+(b.name||b.uid)+'"? This can’t be undone.')) del(b.uid); };
-      c.querySelector('.rep').onclick=function(){ replay(b.uid); };
+      // Confirm in place. Clearing the greeted-today mark changes nothing you can
+      // see in the grid, so without this the button looks like it did nothing
+      // whether it worked or not.
+      c.querySelector('.rep').onclick=function(e){
+        var btn=e.target, was=btn.textContent;
+        btn.disabled=true; btn.textContent='…';
+        post('/api/countdown/replay',{uid:b.uid}).then(function(){
+          btn.textContent='will play on next tap';
+          setTimeout(function(){ btn.textContent=was; btn.disabled=false; },2500);
+        }).catch(function(){
+          btn.textContent='failed';
+          setTimeout(function(){ btn.textContent=was; btn.disabled=false; },2500);
+        });
+      };
       c.querySelector('.edit').onclick=function(){
         c.innerHTML='<label>Name</label><input class="nn" value="'+esc(b.name)+'" maxlength="32">'
           +'<label>Sound</label>'+sel(b.sound)
@@ -285,6 +328,71 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
   }
   document.getElementById('refreshBtn').onclick=load;
   load();
+
+  // --- live updates ------------------------------------------------------
+  // The device can't call us, so the page asks - but /api/bands is ~540 bytes
+  // and rebuilding it every two seconds to learn nothing would be wasteful.
+  // /api/scan answers "has anything happened?" in ~40 bytes, and only a change
+  // in the counter is worth the real fetch.
+  (function(){
+    var lastN=null, inFlight=false, misses=0, sentAt=0, gen=0;
+    var stateEl=document.getElementById('devstate');
+
+    function setState(kind,text){
+      if(!kind){ stateEl.className=''; stateEl.textContent=''; return; }
+      stateEl.className='on '+kind;
+      stateEl.innerHTML='<span class="dot"></span>'+text;
+    }
+
+    function poll(){
+      // Don't stack requests: if the device is busy and a reply is slow, a
+      // plain interval piles more on top exactly when it can least cope.
+      //
+      // But never let that guard become permanent. A tab backgrounded mid-fetch
+      // can be frozen with its promise chain unsettled, and inFlight would then
+      // stay true for the life of the page - the poller looks alive, ticks every
+      // two seconds, and returns here every time. After 8s, call it lost.
+      if(inFlight && Date.now()-sentAt<8000) return;
+      if(document.hidden) return;
+      // render() does grid.innerHTML='' - it destroys and rebuilds every card.
+      // Refreshing mid-edit would wipe a half-typed name, so leave the DOM
+      // alone while an editor is open and pick it up on the next poll.
+      if(document.querySelector('.nn')) return;
+      var my=++gen;                            // a reply we gave up on gets no vote
+      inFlight=true; sentAt=Date.now();
+      fetch('/api/scan',{cache:'no-store'}).then(function(r){return r.json();})
+        .then(function(s){
+          if(my!==gen) return;
+          misses=0;
+          if(s.busy){                        // lights are running; stay out of the way
+            setState('busy','In use &mdash; playing a sound and light show.');
+            return;
+          }
+          setState(null);
+          if(lastN===null){ lastN=s.n; return; }   // first reply: sync, don't re-fetch
+          if(s.n!==lastN){ lastN=s.n; load(); }
+        })
+        .catch(function(){
+          if(my!==gen) return;
+          // One dropped request is normal - a moment, a busy moment, a blip.
+          // Only call it offline after a couple in a row, or the banner flickers
+          // and stops meaning anything.
+          if(++misses>=2)
+            setState('off','Can’t reach the device — it may be rebooting or off the network. This page is showing the last known state.');
+        })
+        .then(function(){ if(my===gen) inFlight=false; });
+    }
+    setInterval(poll,2000);
+    // Three "we're back" signals, because they cover different cases and no one
+    // of them covers all three. visibilitychange fires on a tab switch or a
+    // minimise. focus catches switching to another *application*, which on
+    // desktop leaves the page nominally visible while the browser throttles its
+    // timers to a crawl - so the interval alone can be up to a minute late.
+    // pageshow catches a back/forward-cache restore, where no timer ever fires.
+    document.addEventListener('visibilitychange',poll);
+    window.addEventListener('focus',poll);
+    window.addEventListener('pageshow',poll);
+  })();
 
   // Reboot, so you don't have to go and unplug it.
   var rb=document.getElementById('rebootBtn'), rm=document.getElementById('rebootMsg');

@@ -236,7 +236,8 @@ esp_err_t ota_install_from_url(const char *url)
 }
 
 esp_err_t ota_update_from_manifest(const char *manifest_url,
-                                   const char *cur_version, bool *installed)
+                                   const char *cur_version, bool *installed,
+                                   bool verify_assets)
 {
     if (installed) *installed = false;
 
@@ -253,6 +254,30 @@ esp_err_t ota_update_from_manifest(const char *manifest_url,
     bool assets_ok = (assets_sync_json(json, &assets_updated) == ESP_OK);
     if (assets_updated > 0)
         ESP_LOGI(TAG, "synced %d asset file(s) from manifest", assets_updated);
+
+    // The device's own audio pack, if it has one. Separate URL, separate
+    // document, usually a private one - the public firmware manifest can't
+    // carry a personal voice bank.
+    //
+    // A pack failure does NOT defer the firmware, and the difference from the
+    // block above is the whole point. Those assets ship in the same document as
+    // the firmware, so new code may need them. A pack is somebody's personal
+    // audio on somebody's own host - the firmware never references it, and it
+    // is the thing most likely to be offline, moved, or paid up until last
+    // Tuesday. Coupling them means one dead host freezes firmware updates
+    // permanently, including the update that would fix whatever else is wrong.
+    {
+        device_config_t pcfg;
+        appcfg_load(&pcfg);
+        if (pcfg.assets_url[0]) {
+            int pack_updated = 0;
+            if (assets_sync_pack(pcfg.assets_url, cur_version, &pack_updated, NULL,
+                                 verify_assets) != ESP_OK)
+                ESP_LOGW(TAG, "audio pack did not sync - continuing (will retry next check)");
+            if (pack_updated > 0)
+                ESP_LOGI(TAG, "synced %d file(s) from the audio pack", pack_updated);
+        }
+    }
 
     ota_manifest_t m;
     int prc = ota_parse_manifest(json, &m);

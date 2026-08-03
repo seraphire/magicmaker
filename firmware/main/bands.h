@@ -24,6 +24,15 @@ void bands_note_scan(const uint8_t *uid, uint8_t len);
 // False if nothing has been scanned since boot.
 bool bands_last_scan(char *out, size_t sz);
 
+// Bumped on every scan, so the web page can tell "something happened" from a
+// tiny poll instead of re-fetching the whole band list. RAM only and never
+// persisted - it means nothing across a reboot, and writing it to NVS on every
+// tap would be flash wear for no purpose.
+//
+// One byte on purpose. The page compares with != rather than >, so wrapping
+// past 255 still reads as a change and there's nothing to guard against.
+uint8_t bands_scan_seq(void);
+
 // Friendly name for a band, keyed by its 8-hex UID, persisted in NVS.
 // bands_get_name returns false (and out="") when the band has no name.
 bool bands_get_name(const char *uid_hex, char *out, size_t sz);
