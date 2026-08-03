@@ -140,6 +140,7 @@ and there's a browser-based splitter for cutting one long take into clips.
 
 | Doc | About |
 |---|---|
+| **[SHIPPING.md](docs/SHIPPING.md)** | **start here to publish anything** — what reaches a device, and how |
 | [ota-setup.md](docs/ota-setup.md) | hosting updates on GitHub |
 | [media-ota.md](docs/media-ota.md) | the manifest format |
 | [countdown-recording-script.md](docs/countdown-recording-script.md) | recording the clip bank |
