@@ -13,9 +13,14 @@
   source. Devices poll it, so committing it to `main` means any routine code
   push is one bad merge away from telling every unit in the field to install
   something. Keeping it on a branch that holds nothing else makes publishing a
-  deliberate act. Note the two branches are used for different things:
-    -Branch         where the ASSETS are read from  (main - has firmware/spiffs)
-    -ManifestBranch where the MANIFEST is published (ota  - holds only itself)
+  deliberate act. Three refs, three jobs:
+    -Branch         where source + assets are PUSHED  (main)
+    -AssetRef       where assets are SERVED from      (the v<Version> tag)
+    -ManifestBranch where the MANIFEST is published   (ota - holds only itself)
+
+  Assets are served from the tag rather than the branch because the manifest
+  pins them by sha256, and a branch moves out from under that. See the comment
+  by $rawBase.
 
   Usage:
     tools\release.ps1 -Version 1.0.2 -Repo yourname/magicmaker
@@ -29,7 +34,8 @@
 param(
   [Parameter(Mandatory=$true)][string]$Version,
   [Parameter(Mandatory=$true)][string]$Repo,      # "user/repo"
-  [string]$Branch = "main",           # branch the assets are served from
+  [string]$Branch = "main",           # branch the source+assets are PUSHED to
+  [string]$AssetRef = "",             # git ref assets are SERVED from; default: the v<Version> tag
   [string]$ManifestBranch = "ota",    # branch the manifest is published to
   [string[]]$Assets = @(),
   [switch]$AllAssets,
@@ -46,9 +52,22 @@ $fw     = Join-Path $root "firmware"
 $spiffs = Join-Path $fw "spiffs"
 $out    = Join-Path $root "release"
 
-# Assets read from $Branch (that's where firmware/spiffs is committed); the
-# manifest publishes to $ManifestBranch, which holds nothing else.
-$rawBase  = "https://raw.githubusercontent.com/$Repo/$Branch/firmware/spiffs/"
+# Assets are read from the release TAG, not from $Branch.
+#
+# A manifest pins each asset by sha256, so the URL it names has to keep serving
+# those exact bytes - and a branch does not. Push a changed index.html to main
+# and every published manifest still claims the old hash while the URL now
+# returns the new file. Nothing breaks the same day, because a device that
+# already has the file never re-fetches it; but a device that DOES need it
+# again - after a reflash wipes installed.json, say - downloads the new bytes,
+# fails verification, and defers the firmware update along with it. A stale
+# manifest would quietly poison a fresh unit.
+#
+# Tags don't move. `gh release create v$Version` makes one, and that happens
+# before the manifest is published (see the ordering at the end), so the tag
+# always exists by the time any device looks.
+$assetRef = if ($AssetRef) { $AssetRef } else { "v$Version" }
+$rawBase  = "https://raw.githubusercontent.com/$Repo/$assetRef/firmware/spiffs/"
 $relBase  = "https://github.com/$Repo/releases/download/v$Version"
 $selfUrl  = "https://raw.githubusercontent.com/$Repo/$ManifestBranch/manifest.json"
 
@@ -164,7 +183,8 @@ Write-Host ""
 Write-Host "next - publish in this order:" -ForegroundColor Cyan
 Write-Host "  1. source + assets to $Branch (devices read assets from here)"
 Write-Host "       git add -A; git commit -m `"release v$Version`"; git push"
-Write-Host "  2. the binary as a release asset"
+Write-Host "  2. the binary as a release asset - this also creates the v$Version TAG,"
+Write-Host "     which is where the manifest points for assets. Must exist before step 3."
 Write-Host "       gh release create v$Version release\firmware.bin --title `"v$Version`""
 Write-Host "  3. LAST - the manifest to $ManifestBranch. This is the go-live switch:" -ForegroundColor Yellow
 Write-Host "       every device in the field acts on it within 6 hours." -ForegroundColor Yellow
