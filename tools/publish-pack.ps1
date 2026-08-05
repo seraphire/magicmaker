@@ -41,7 +41,7 @@ param(
 
     # Minimum firmware. A device below this defers the pack rather than applying
     # a bank whose clips its code never asks for.
-    [string] $RequiresFw = "1.2.0",
+    [string] $RequiresFw = "1.3.0",
 
     # Files to retire from every device, e.g. -Remove chime-1.mp3
     [string[]] $Remove = @(),
