@@ -411,6 +411,45 @@ void assets_pack_version(char *out, size_t sz)
     pack_state_get(NULL, 0, out, sz);
 }
 
+// Resolve an include against its parent's URL and apply it.
+//
+// Relative paths are resolved against the parent manifest's directory, so a
+// pack moves host without editing every include. An absolute URL is honoured as
+// given - occasionally useful, and refusing it would be arbitrary since the
+// parent document is already trusted to name files.
+static esp_err_t sync_include(const char *parent_url, const char *ref, int *n_updated)
+{
+    if (n_updated) *n_updated = 0;
+    if (!ref || !ref[0]) return ESP_OK;
+    if (strstr(ref, "..")) { ESP_LOGW(TAG, "include escapes its base: %s", ref); return ESP_FAIL; }
+
+    char sub[256];
+    if (strncmp(ref, "http://", 7) == 0 || strncmp(ref, "https://", 8) == 0) {
+        snprintf(sub, sizeof(sub), "%s", ref);
+    } else {
+        const char *slash = strrchr(parent_url, '/');
+        int dirlen = slash ? (int)(slash - parent_url) : (int)strlen(parent_url);
+        snprintf(sub, sizeof(sub), "%.*s/%s", dirlen, parent_url, ref);
+    }
+
+    char *json = malloc(PACK_MAX);
+    if (!json) return ESP_FAIL;
+    int n = ota_http_get(sub, json, PACK_MAX);
+    if (n <= 0) { ESP_LOGW(TAG, "sub-pack fetch failed: %s", sub); free(json); return ESP_FAIL; }
+
+    cJSON *root = cJSON_Parse(json);
+    free(json);
+    if (!root) { ESP_LOGW(TAG, "sub-pack is not valid JSON: %s", sub); return ESP_FAIL; }
+
+    // Always force inside a sub-pack: the version short-circuit belongs to the
+    // top-level document, and a sub-pack carries no version of its own to
+    // compare. Its files are checked against flash, which is cheap.
+    esp_err_t r = sync_root(root, n_updated, true);
+    cJSON_Delete(root);
+    ESP_LOGI(TAG, "sub-pack %s: %d file(s) updated", ref, n_updated ? *n_updated : 0);
+    return r;
+}
+
 esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
                            int *n_updated, bool *deferred, bool force)
 {
@@ -457,6 +496,32 @@ esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
 
     int updated = 0;
     esp_err_t r = sync_root(root, &updated, force);
+
+    // Sub-packs. Three themed occasions take the bank past 270 files, against a
+    // 128-entry cap and a 16 KB parse buffer - so split the document rather
+    // than grow the parser. Each include is ~54 entries / ~6 KB and is applied
+    // on its own, so PEAK MEMORY DOESN'T MOVE however many sets exist.
+    //
+    // Depth 1 only: an include inside an include is ignored, because a bounded
+    // fetch graph is worth more here than the generality. Nothing about audio
+    // sets needs a tree.
+    cJSON *inc = cJSON_GetObjectItem(root, "include");
+    if (cJSON_IsArray(inc)) {
+        cJSON *it;
+        cJSON_ArrayForEach(it, inc) {
+            if (!cJSON_IsString(it)) continue;
+            int sub_updated = 0;
+            if (sync_include(url, it->valuestring, &sub_updated) != ESP_OK) {
+                // One bad sub-pack costs its own set, not the bank. Carry on so
+                // the others still land, and fail the whole run so the version
+                // isn't recorded and the next check retries.
+                ESP_LOGW(TAG, "sub-pack failed: %s", it->valuestring);
+                r = ESP_FAIL;
+            }
+            updated += sub_updated;
+        }
+    }
+
     cJSON_Delete(root);
     if (n_updated) *n_updated = updated;
 

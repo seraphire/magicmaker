@@ -12,7 +12,7 @@
 #include "esp_err.h"
 
 // Bump when the on-disk shape changes so older saves can be migrated.
-#define APPCFG_VERSION 3
+#define APPCFG_VERSION 4
 
 typedef struct {
     char wifi_ssid[33];      // home network SSID (empty = not provisioned)
@@ -58,6 +58,12 @@ typedef struct {
     // bank licensed for personal use only, or a clip recorded for one
     // particular child, cannot live there.
     char assets_url[129];
+
+    // Which occasion's countdown framing to speak - a directory under
+    // /spiffs/cd/sets/. "trip" is the one this was built for; xmas, hallow and
+    // bday are the reason the bank got split. Not setup-gated: it changes which
+    // audio plays, nothing about who can reach the device.
+    char audio_set[16];
 
     uint32_t config_version;
 } device_config_t;

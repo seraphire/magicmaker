@@ -13,7 +13,6 @@ static const char *TAG = "sounds";
 #define SOUND_DIR   "/spiffs/"
 #define GROUP_MAX   24        // assignable groups; the dropdown gets unusable
                               // long before this and it is only ~2.7 KB static
-#define VARIANT_MAX 16        // probe ceiling for name-1, name-2, ...
 
 // One assignable action. A GROUP, not a file: "chime" covers chime.wav plus any
 // chime-1, chime-2 ... beside it, and a tap picks between them.
@@ -210,23 +209,7 @@ void sound_pick(const char *logical, char *out, size_t sz)
     if (!logical || !logical[0]) { if (sz) out[0] = '\0'; return; }
     snprintf(out, sz, "%s", logical);          // fall back to what we were given
 
-    char stem[48];
-    snprintf(stem, sizeof(stem), "%s", logical);
-    char *dot = strrchr(stem, '.');
-    if (dot) *dot = '\0';
-
-    const char *cand[VARIANT_MAX];
-    static char buf[VARIANT_MAX][64];
-    int n = 0;
-
-    snprintf(buf[n], sizeof(buf[0]), "%s.wav", stem);
-    if (audio_resolve(buf[n], NULL, 0)) cand[n] = buf[n], n++;
-
-    for (int v = 1; n < VARIANT_MAX; v++) {
-        snprintf(buf[n], sizeof(buf[0]), "%s-%d.wav", stem, v);
-        if (!audio_resolve(buf[n], NULL, 0)) break;   // stop at the first gap
-        cand[n] = buf[n]; n++;
-    }
-
-    if (n > 0) snprintf(out, sz, "%s", cand[esp_random() % (uint32_t)n]);
+    char path[128];
+    if (audio_pick_variant(logical, 0xFF, path, sizeof(path)) >= 0)
+        snprintf(out, sz, "%s", path);
 }

@@ -165,11 +165,31 @@ static void celebrate_seq(char paths[][CD_PATH_MAX], int n, anim_id_t anim)
 //
 // The expansion lives here rather than at the call sites so every route into a
 // moment gets it - a band's own sound, a random pick, and the boot greetings -
-// and none can be forgotten later. A stored path is a logical base name, so
-// "/spiffs/chime.wav" plays chime or any chime-N sitting beside it, chosen
-// fresh on each tap. Paths with no variants come back untouched.
+// and none can be forgotten later.
+//
+// Takes an ID ("chime") or a path ("/spiffs/Program/hello.wav"), told apart by
+// the slash. Enrollments store ids so a theme can move the file underneath them;
+// the boot prompts and the compiled defaults in tags.h are still literal paths,
+// and there's no reason to churn them. Resolving both here means neither caller
+// has to know which kind it holds.
+//
+// Then the variant expansion: "chime" plays chime or any chime-N beside it,
+// chosen fresh on each tap. A name with no variants comes back untouched.
 static void celebrate(const char *sound, anim_id_t anim)
 {
+    char resolved[CD_PATH_MAX];
+    if (sound && sound[0] && !strchr(sound, '/')) {
+        if (!sound_path_for_id(sound, resolved, sizeof(resolved)) || !resolved[0]) {
+            // The id names nothing this device holds - a theme that never
+            // arrived, or a clip retired out from under the band. Say so rather
+            // than playing silence, which is indistinguishable from a dead
+            // reader.
+            ESP_LOGW(TAG, "no sound for id '%s' - is its theme installed?", sound);
+            return;
+        }
+        sound = resolved;
+    }
+
     char pick[CD_PATH_MAX];
     sound_pick(sound, pick, sizeof(pick));
     sound = pick;
@@ -503,6 +523,7 @@ void app_main(void)
         appcfg_load(&c);
         leds_set_layout(c.ring_leds, c.mickey_leds, c.ring_first);
         leds_set_idle_color(c.idle_color);
+        countdown_set_audio_set(c.audio_set);   // which occasion's framing to speak
         s_boot_audio = c.boot_audio_enabled;
     }
 
@@ -703,7 +724,7 @@ void app_main(void)
                     prog_mode = false;
                     leds_off();
                 } else if (uid_len >= 4 && audition >= 0) {
-                    esp_err_t r = store_save(uid, sound_path(audition),
+                    esp_err_t r = store_save(uid, sound_id(audition),
                                              (uint8_t)anim_for_sound(sound_path(audition)));
                     if (r == ESP_OK) {
                         audio_play(PROMPT_SAVED);

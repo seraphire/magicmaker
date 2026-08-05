@@ -47,8 +47,9 @@ $Source = (Resolve-Path $Source).Path
 $assetsOut = Join-Path $Out 'assets'
 New-Item -ItemType Directory -Force -Path $assetsOut | Out-Null
 
-$entries = @()
-$copied = 0
+$entries = @()      # goes in the main manifest
+$subs    = @{}      # set name -> entries, each written as its own sub-manifest
+$copied  = 0
 
 Get-ChildItem $Source -Recurse -File | Sort-Object FullName | ForEach-Object {
     $rel = $_.FullName.Substring($Source.Length + 1) -replace '\\', '/'
@@ -61,7 +62,20 @@ Get-ChildItem $Source -Recurse -File | Sort-Object FullName | ForEach-Object {
     Copy-Item $_.FullName $dst -Force
     $copied++
 
-    $entries += [pscustomobject]@{ path = $rel; sha256 = $hash; bytes = $_.Length }
+    $e = [pscustomobject]@{ path = $rel; sha256 = $hash; bytes = $_.Length }
+
+    # Each occasion becomes its own sub-manifest. Not for tidiness: the device
+    # parses a whole document at once, so one flat list of ~270 files blows both
+    # the 128-entry cap and the 16 KB buffer. Split, and peak memory is one
+    # set's worth no matter how many sets exist. It also means editing a single
+    # Christmas line republishes ~6 KB instead of re-listing everything.
+    if ($rel -match '^cd/sets/([^/]+)/') {
+        $set = $Matches[1]
+        if (-not $subs.ContainsKey($set)) { $subs[$set] = @() }
+        $subs[$set] += $e
+    } else {
+        $entries += $e
+    }
 }
 
 # A remove-only pack is legitimate - "retire these, send nothing" - and the
@@ -76,9 +90,13 @@ if ($entries.Count -gt 128) { throw "$($entries.Count) files - the device caps a
 # The removals are in the fingerprint deliberately. Leave them out and adding a
 # retirement to an otherwise unchanged pack doesn't move the version - so the
 # device short-circuits, and the file it was told to delete stays forever.
+# Sub-manifest entries are in the fingerprint too: the top-level version is
+# what the device short-circuits on, so a changed Christmas clip has to move it
+# or the sub-pack would never be re-read.
+$allEntries = @($entries) + @($subs.Keys | Sort-Object | ForEach-Object { $subs[$_] })
 $fingerprint = (
-    ($entries | ForEach-Object { "$($_.path):$($_.sha256)" }) +
-    ($Remove  | Sort-Object   | ForEach-Object { "-$_" })
+    ($allEntries | ForEach-Object { "$($_.path):$($_.sha256)" }) +
+    ($Remove     | Sort-Object   | ForEach-Object { "-$_" })
 ) -join "`n"
 $sha = [System.Security.Cryptography.SHA256]::Create()
 $version = ([BitConverter]::ToString(
@@ -93,7 +111,23 @@ $pack = [ordered]@{
         files    = @($entries)   # @() so one file still serializes as an array
     }
 }
-if ($Remove.Count -gt 0) { $pack.assets.remove = $Remove }
+if ($Remove.Count -gt 0) { $pack.assets.remove = @($Remove) }
+
+# One sub-manifest per occasion, written beside the main one.
+$includes = @()
+foreach ($set in ($subs.Keys | Sort-Object)) {
+    $subEntries = $subs[$set]
+    if ($subEntries.Count -gt 128) { throw "set '$set' has $($subEntries.Count) files - the device caps a manifest at 128" }
+    $subDoc = [ordered]@{
+        assets = [ordered]@{ base_url = $BaseUrl; files = @($subEntries) }
+    }
+    $subJson = $subDoc | ConvertTo-Json -Depth 6 -Compress
+    if ($subJson.Length -gt 15500) { throw "set '$set' manifest is $($subJson.Length) bytes; the device buffer is 16 KB" }
+    New-Item -ItemType Directory -Force -Path (Join-Path $Out 'sets') | Out-Null
+    Set-Content (Join-Path $Out "sets\$set.json") $subJson -Encoding UTF8
+    $includes += "sets/$set.json"
+}
+if ($includes.Count -gt 0) { $pack.include = @($includes) }
 
 # Compressed, not pretty-printed: the device reads this into a fixed 16 KB
 # buffer, and indentation on a hundred entries is kilobytes of nothing.
@@ -103,7 +137,11 @@ if ($json.Length -gt 15500) {
 }
 Set-Content (Join-Path $Out 'pack.json') $json -Encoding UTF8
 
-$bytes = [int](($entries | Measure-Object bytes -Sum).Sum)
-Write-Host "pack $version - $($entries.Count) file(s), $([math]::Round($bytes/1KB)) KB, requires fw $RequiresFw"
+$bytes = [int](($allEntries | Measure-Object bytes -Sum).Sum)
+Write-Host "pack $version - $($allEntries.Count) file(s), $([math]::Round($bytes/1KB)) KB, requires fw $RequiresFw"
+Write-Host "  main manifest : $($entries.Count) file(s), $($json.Length) bytes"
+foreach ($set in ($subs.Keys | Sort-Object)) {
+    Write-Host "  set $($set.PadRight(12)): $($subs[$set].Count) file(s)"
+}
 if ($Remove.Count -gt 0) { Write-Host "  retiring: $($Remove -join ', ')" }
 Write-Host "  wrote $(Join-Path $Out 'pack.json') and $copied file(s) to $assetsOut"

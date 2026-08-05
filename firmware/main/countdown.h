@@ -34,6 +34,14 @@
 #include <stdbool.h>
 
 #define CD_PATH_MAX  64
+
+// Which occasion's framing clips to speak: a directory under /spiffs/cd/sets/.
+// The numbers are shared - "four days" is four days whichever occasion it is -
+// so a set is only the ~54 clips that give it its character.
+//
+// The active set MASKS the shared bank per family, not per file: if the set
+// ships any tail-*, its tails are the whole pool. See countdown.c.
+void countdown_set_audio_set(const char *id);
 #define CD_MAX_CLIPS 6      // longest phrase: lead + number + unit + trailer
 
 // Assemble the phrase for a given day count (negative = trip is in the past).

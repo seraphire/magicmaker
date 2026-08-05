@@ -53,6 +53,10 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         s_retries        = 0;
         s_connected      = true;
         s_ever_connected = true;
+        // Delegated mDNS names carry a literal address, so a new lease has to
+        // be pushed into them or they keep advertising the old one - which is
+        // worse than not answering, because a stale A record resolves.
+        wifi_mdns_refresh_delegates();
         xEventGroupSetBits(s_events, WIFI_CONNECTED_BIT);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         s_ap_join_pending = true;               // phone joined the setup AP
@@ -218,6 +222,67 @@ void wifi_hostname_for(const char *instance, char *out, size_t sz)
         snprintf(out, sz, "magicmaker-%s", wifi_device_id());
 }
 
+// ---------------------------------------------------------------------------
+// The device answers on THREE names, because one name has to serve three jobs
+// it can't all do well:
+//
+//   magicmaker.local        constant on every unit. THE SPOKEN NAME - short
+//                           enough to say out loud and remember. "magicmaker
+//                           dash zero eff eight five dot local" is not, and
+//                           nobody transcribes it correctly while annoyed.
+//   magicmaker-<id>.local   unique forever, derived from the MAC. THE PRINTED
+//                           /QR NAME - nobody types it, which is exactly what
+//                           made it a bad spoken name and makes it a good
+//                           scanned one. Also the only name that reaches THIS
+//                           reader once a house has two.
+//   <their name>.local      the primary, whatever they called it. Daily use.
+//
+// The point isn't redundancy, it's that renaming used to silently break every
+// written and spoken reference to the device. Now the first two are constants:
+// a Help clip, the setup prompts, a printed card, anything written a year from
+// now can name them and stay correct forever.
+//
+// The extras are DELEGATED hostnames, which carry an explicit address - so they
+// have to be refreshed whenever the IP moves (DHCP renewal, reconnect after an
+// outage). mdns_refresh_delegates() below does that, called from the GOT_IP
+// handler.
+static char s_delegate[2][32];      // the extra names actually registered
+static int  s_delegate_n = 0;
+
+static void delegate_set_addr(const char *name)
+{
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip;
+    if (!sta || esp_netif_get_ip_info(sta, &ip) != ESP_OK || ip.ip.addr == 0) return;
+
+    mdns_ip_addr_t addr = { 0 };
+    addr.addr.type = ESP_IPADDR_TYPE_V4;
+    addr.addr.u_addr.ip4.addr = ip.ip.addr;
+    addr.next = NULL;
+
+    // add() first; if it's already there, set_address() moves it to the new IP.
+    if (mdns_delegate_hostname_add(name, &addr) != ESP_OK)
+        mdns_delegate_hostname_set_address(name, &addr);
+}
+
+void wifi_mdns_refresh_delegates(void)
+{
+    for (int i = 0; i < s_delegate_n; i++) delegate_set_addr(s_delegate[i]);
+}
+
+static void delegate_add(const char *name, const char *primary)
+{
+    // Skip the one that IS the primary - an unnamed device is already
+    // "magicmaker-<id>", and delegating a name to itself is at best a no-op.
+    if (strcmp(name, primary) == 0) return;
+    if (s_delegate_n >= (int)(sizeof(s_delegate) / sizeof(s_delegate[0]))) return;
+
+    strncpy(s_delegate[s_delegate_n], name, sizeof(s_delegate[0]) - 1);
+    s_delegate[s_delegate_n][sizeof(s_delegate[0]) - 1] = '\0';
+    s_delegate_n++;
+    delegate_set_addr(name);
+}
+
 void wifi_start_mdns(const char *instance)
 {
     static bool started = false;
@@ -234,6 +299,18 @@ void wifi_start_mdns(const char *instance)
 
     mdns_hostname_set(host);
     if (instance && instance[0]) mdns_instance_name_set(instance);
+
+    // Re-registering from scratch on a rename: drop what we had first.
+    for (int i = 0; i < s_delegate_n; i++) mdns_delegate_hostname_remove(s_delegate[i]);
+    s_delegate_n = 0;
+
+    char idhost[32];
+    snprintf(idhost, sizeof(idhost), "magicmaker-%s", wifi_device_id());
+    delegate_add("magicmaker", host);
+    delegate_add(idhost,       host);
+
+    ESP_LOGI(TAG, "mDNS also answering: %s", s_delegate_n ? s_delegate[0] : "(none)");
+    if (s_delegate_n > 1) ESP_LOGI(TAG, "mDNS also answering: %s", s_delegate[1]);
     // Note: the browsable _http._tcp service is advertised later, when the
     // persistent LAN page ships with the countdown stage.
     ESP_LOGI(TAG, "mDNS up: %s.local  (\"%s\")", host, instance ? instance : "");

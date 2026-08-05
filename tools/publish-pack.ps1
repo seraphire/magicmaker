@@ -105,12 +105,25 @@ try {
 # manifest back and confirm it's the one just built. A deploy that reported
 # success while serving a stale pack is the failure this catches.
 $url = "https://$($s.host)/$($s.secret)/pack.json"
-Start-Sleep -Seconds 2
-try {
-    $live = (Invoke-WebRequest $url -TimeoutSec 20).Content | ConvertFrom-Json
-} catch {
-    throw "deployed, but $url did not fetch back: $_"
+
+# Poll rather than check once. Cloudflare's edge takes a few seconds to serve a
+# new deploy, and a single immediate check reports "deploy did not take" on a
+# deploy that took fine - which trains you to ignore the one time it means it.
+#
+# Deliberately NOT cache-busted with a query string: the point is to observe
+# what a DEVICE would fetch, and a device won't cache-bust either. When this
+# finally matches, the pack is genuinely reachable.
+$live = $null
+$deadline = (Get-Date).AddSeconds(45)
+while ((Get-Date) -lt $deadline) {
+    Start-Sleep -Seconds 3
+    try {
+        $live = (Invoke-WebRequest $url -TimeoutSec 20).Content | ConvertFrom-Json
+        if ($live.version -eq $pack.version) { break }
+    } catch { $live = $null }
+    Write-Host "  waiting for the edge to serve the new pack..." -ForegroundColor DarkGray
 }
+if (-not $live) { throw "deployed, but $url did not fetch back" }
 
 Write-Host ""
 if ($live.version -eq $pack.version) {
@@ -120,5 +133,31 @@ if ($live.version -eq $pack.version) {
     Write-Host "Devices pick this up within 6 hours. To take it now, on the device:" -ForegroundColor Cyan
     Write-Host "  sync-media"
 } else {
-    throw "served version is $($live.version), expected $($pack.version) - deploy did not take"
+    throw "after 45s the edge still serves version $($live.version), expected $($pack.version)"
+}
+
+# Sub-manifests have to be reachable AND current. Reachable isn't enough: the
+# edge can serve a fresh pack.json alongside a stale sets/*.json, and the two
+# disagree in the worst possible way - the parent retires a clip, the stale
+# child still lists it, and because children are applied after the parent the
+# child wins. The removal reports success and silently undoes itself.
+#
+# Observed exactly that. So compare each served include against the bytes just
+# written, and keep waiting until they match.
+foreach ($inc in @($live.include)) {
+    if (-not $inc) { continue }
+    $iu    = "https://$($s.host)/$($s.secret)/$inc"
+    $local = (Get-Content (Join-Path $packDir ($inc -replace '/', '\')) -Raw).Trim()
+    $ok    = $false
+    $wait  = (Get-Date).AddSeconds(45)
+    while ((Get-Date) -lt $wait) {
+        try {
+            $served = (Invoke-WebRequest $iu -TimeoutSec 20).Content.Trim()
+            if ($served -eq $local) { $ok = $true; break }
+            Write-Host "      include $inc is stale at the edge, waiting..." -ForegroundColor DarkGray
+        } catch { }
+        Start-Sleep -Seconds 3
+    }
+    if (-not $ok) { throw "include '$inc' is stale or unreachable at $iu - devices would apply an old set" }
+    Write-Host "      include $inc  ok and current" -ForegroundColor DarkGray
 }

@@ -606,15 +606,15 @@ static bool hex_to_uid(const char *s, uint8_t u[4])
 }
 
 // store_list callback -> append one band object to the JSON array.
-static void band_to_json(const char *uid_hex, const char *sound, uint8_t anim, void *ctx)
+static void band_to_json(const char *uid_hex, const char *sound_id, uint8_t anim, void *ctx)
 {
     cJSON *arr = (cJSON *)ctx;
     cJSON *o = cJSON_CreateObject();
     cJSON_AddStringToObject(o, "uid", uid_hex);
     char nm[BAND_NAME_MAX + 1]; bands_get_name(uid_hex, nm, sizeof(nm));
     cJSON_AddStringToObject(o, "name", nm);
-    char sid[24]; sound_id_for_path(sound, sid, sizeof(sid));   // "" -> "random"
-    cJSON_AddStringToObject(o, "sound", sid);
+    // store_list now hands us the id directly; "" is the RANDOM action.
+    cJSON_AddStringToObject(o, "sound", sound_id[0] ? sound_id : SOUND_RANDOM_ID);
     cJSON_AddNumberToObject(o, "anim", anim);
     cJSON_AddNumberToObject(o, "cdmode", countdown_get_mode(uid_hex));
     cJSON_AddItemToArray(arr, o);
@@ -674,7 +674,11 @@ static esp_err_t api_band_post(httpd_req_t *req)
     if (!sound_path_for_id(sid, path, sizeof(path)))  { httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad sound"); return ESP_OK; }
 
     char canon[9]; uid_to_hex(u, canon);
-    store_save(u, path, (uint8_t)sound_anim(path));   // path "" (random) -> anim unused
+    // Store the ID. `path` was only ever resolved here to pick the animation,
+    // and it stays that way - the file it names may be replaced by a theme, but
+    // the animation belongs to the action, not the file.
+    store_save(u, (strcmp(sid, SOUND_RANDOM_ID) == 0) ? "" : sid,
+               (uint8_t)sound_anim(path));
     bands_set_name(canon, name);
     char modebuf[8];
     if (form_get(body, "cdmode", modebuf, sizeof(modebuf)))   // only when the form sends it

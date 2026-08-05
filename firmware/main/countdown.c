@@ -15,7 +15,6 @@ static const char *TAG = "countdown";
 
 #define CD_DIR      "/spiffs/cd/"
 #define NS          "cd"        // NVS namespace: per-band state
-#define POOL_MAX    32          // sanity cap when probing pool-N.wav
 
 // Unit stepping - which unit we reach for first, so the spoken number stays 1-31
 // and is always a single whole recording. These choose the STARTING tier only:
@@ -43,37 +42,73 @@ static const char *TAG = "countdown";
 // negative value is unambiguous.
 #define CD_FORCE (-1)
 
-// --- small helpers ----------------------------------------------------------
-// ".wav" here is the logical name; audio_resolve() also accepts the .mp3 the
+// --- where a clip lives -----------------------------------------------------
+// The bank is split by what actually varies:
+//
+//   cd/num/          d4, w2, m6, and      "four days" is four days whether it's
+//                                         a trip, a birthday or Christmas
+//   cd/sets/<id>/    preamble, lead-*,    THIS is what makes it a Disney trip
+//                    tail-*, cheeky-* …
+//
+// so a new occasion is ~54 clips instead of a second copy of all 90.
+//
+// Resolution is a search path - active set first, shared underneath - with one
+// rule that matters more than it looks:
+//
+//   WHICHEVER DIRECTORY ANSWERS FOR A NAME OWNS THE WHOLE FAMILY.
+//
+// Not a per-file union. If the birthday set ships any tail-*, its tails are the
+// entire pool. Union them and a birthday countdown would occasionally close
+// with a Disney line, at random - rare enough to read as a glitch, wrong enough
+// to break the illusion. Masking is the difference between "a set" and "some
+// extra files".
+static char s_set[16] = "trip";
+
+void countdown_set_audio_set(const char *id)
+{
+    snprintf(s_set, sizeof(s_set), "%s", (id && id[0]) ? id : "trip");
+}
+
+// Logical base path for `name`, or false if nothing anywhere answers to it.
+// ".wav" is a logical extension throughout - audio_resolve accepts the .mp3 the
 // build script may have produced instead, so a re-encode never empties a pool.
+// `sz` is deliberately the caller's buffer minus room for the ".wav" that put()
+// appends - the compiler can't infer that on its own, and a silent truncation
+// here would produce a path that resolves to nothing.
+static bool cd_logical(const char *name, char *out, size_t sz)
+{
+    uint8_t probe[1];
+    if (sz > CD_PATH_MAX - 4) sz = CD_PATH_MAX - 4;
+
+    snprintf(out, sz, CD_DIR "sets/%s/%s", s_set, name);
+    if (audio_variants(out, probe, 1) > 0) return true;
+
+    snprintf(out, sz, CD_DIR "num/%s", name);
+    if (audio_variants(out, probe, 1) > 0) return true;
+
+    out[0] = '\0';
+    return false;
+}
+
 static bool have(const char *name)
 {
     char p[CD_PATH_MAX];
-    snprintf(p, sizeof(p), CD_DIR "%s.wav", name);
-    return audio_resolve(p, NULL, 0);
+    return cd_logical(name, p, sizeof(p));
 }
 
 static void put(char paths[][CD_PATH_MAX], int *n, int max, const char *name)
 {
     if (*n >= max) return;
-    snprintf(paths[*n], CD_PATH_MAX, CD_DIR "%s.wav", name);   // resolved at play time
+    char logical[CD_PATH_MAX - 4];
+    if (!cd_logical(name, logical, sizeof(logical))) return;
+    snprintf(paths[*n], CD_PATH_MAX, "%s.wav", logical);   // resolved at play time
     (*n)++;
 }
 
-// How many clips exist in a numbered pool ("lead" -> lead-1.wav, lead-2.wav...).
-static int pool_size(const char *pool)
-{
-    char name[32];
-    int n = 0;
-    while (n < POOL_MAX) {
-        snprintf(name, sizeof(name), "%s-%d", pool, n + 1);
-        if (!have(name)) break;
-        n++;
-    }
-    return n;
-}
-
-// Last clip used from the pools worth not repeating, 1-based; 0 = none yet.
+// Last clip used from the pools worth not repeating, as a variant NUMBER;
+// CD_NO_LAST = none yet. Not 0 for "none": 0 is a real variant (the bare name),
+// and although no countdown pool has one today, "lead.mp3 exists" should not
+// quietly become "never avoid a repeat of lead.mp3".
 // Lead and tail are carried in the band's record (see cd_rec_t.idx) because the
 // record is already written whenever the countdown speaks, so remembering costs
 // nothing. Cheeky is RAM-only on purpose: it fires on consecutive taps of one
@@ -82,7 +117,8 @@ static int pool_size(const char *pool)
 #define SLOT_TAIL   1
 #define SLOT_CHEEKY 2
 #define SLOT_NONE  (-1)
-static uint8_t s_last[3];
+#define CD_NO_LAST 0xFF
+static uint8_t s_last[3] = { CD_NO_LAST, CD_NO_LAST, CD_NO_LAST };
 
 // Append a random member of a pool. Returns false if the pool is empty.
 //
@@ -93,22 +129,24 @@ static uint8_t s_last[3];
 static bool put_random_slot(char paths[][CD_PATH_MAX], int *n, int max,
                             const char *pool, int slot)
 {
-    int cnt = pool_size(pool);
-    if (cnt <= 0) return false;
+    if (*n >= max) return false;
 
-    int pick;
-    uint8_t avoid = (slot >= 0) ? s_last[slot] : 0;
-    if (cnt > 1 && avoid >= 1 && avoid <= cnt) {
-        pick = (int)(esp_random() % (uint32_t)(cnt - 1)) + 1;   // 1..cnt-1
-        if (pick >= avoid) pick++;                              // skip the one just used
-    } else {
-        pick = (int)(esp_random() % (uint32_t)cnt) + 1;
-    }
-    if (slot >= 0) s_last[slot] = (uint8_t)pick;
+    // audio_pick_variant does the drawing, the no-repeat step, and the
+    // enumeration - by reading the directory, so a retired clip in the middle
+    // of a pool no longer hides everything after it.
+    char logical[CD_PATH_MAX];
+    if (!cd_logical(pool, logical, sizeof(logical))) return false;
 
-    char name[32];
-    snprintf(name, sizeof(name), "%s-%d", pool, pick);
-    put(paths, n, max, name);
+    uint8_t avoid = (slot >= 0) ? s_last[slot] : CD_NO_LAST;
+    char path[CD_PATH_MAX];
+    int chosen = audio_pick_variant(logical, avoid, path, sizeof(path));
+    if (chosen < 0) return false;
+
+    // Store the variant NUMBER, not a position in the list - it has to keep
+    // meaning the same clip after a pack adds or retires others.
+    if (slot >= 0) s_last[slot] = (uint8_t)chosen;
+
+    snprintf(paths[(*n)++], CD_PATH_MAX, "%s", path);
     return true;
 }
 
@@ -119,14 +157,18 @@ static bool put_random(char paths[][CD_PATH_MAX], int *n, int max, const char *p
     return put_random_slot(paths, n, max, pool, SLOT_NONE);
 }
 
-// Pack/unpack the two persisted slots into the record's one int16_t: lead in the
-// low byte, tail in the high byte. Pools cap at POOL_MAX (32), so a byte each is
-// ample, and the -1 that means "nothing yet" unpacks to two out-of-range values
-// which the guard above already ignores.
+// Pack/unpack the two persisted slots into the record's one int16_t: lead in
+// the low byte, tail in the high byte. Variant numbers cap at
+// AUDIO_VARIANT_MAX, so a byte each is ample.
+//
+// The two sentinels line up exactly: a fresh record's idx is -1, which is
+// 0xFFFF, which unpacks to CD_NO_LAST in both slots - and packing two
+// CD_NO_LASTs gives -1 back. "Nothing remembered" means the same thing in the
+// record and in RAM, with no special case at either end.
 static void seen_load(int16_t packed)
 {
-    s_last[SLOT_LEAD] = (packed >= 0) ? (uint8_t)( packed       & 0xFF) : 0;
-    s_last[SLOT_TAIL] = (packed >= 0) ? (uint8_t)((packed >> 8) & 0xFF) : 0;
+    s_last[SLOT_LEAD] = (uint8_t)( (uint16_t)packed       & 0xFF);
+    s_last[SLOT_TAIL] = (uint8_t)(((uint16_t)packed >> 8) & 0xFF);
 }
 
 static int16_t seen_store(void)
@@ -346,11 +388,39 @@ static bool is_speaking_day(int days)
 // --- per-band state ---------------------------------------------------------
 // {day we last greeted this band, which variant, mode}. Same 8-byte footprint
 // as the original {day,idx} thanks to padding, so older records read cleanly.
-typedef struct { int32_t day; int16_t idx; uint8_t mode; } cd_rec_t;
-
+// How often a band speaks the countdown. Declared here rather than further
+// down because rec_load() below validates against them.
 #define CD_DAILY  0
 #define CD_ALWAYS 1
 #define CD_OFF    2
+
+// APPEND ONLY, for the reasons spelled out in store.c. This one is less
+// dangerous than an enrolment - the worst case is a band forgetting it was
+// greeted today, or reverting to the default speaking mode - but "less
+// dangerous" is not a reason to lose a setting somebody chose.
+typedef struct { int32_t day; int16_t idx; uint8_t mode; } cd_rec_t;
+
+// Length-tolerant read, matching store.c's entry_load(). Returns false if there
+// is no record at all; a record of an unexpected SIZE is read as far as the
+// overlap goes rather than discarded, so growing this struct later - or an OTA
+// rollback after a build that already grew it - doesn't reset what the owner
+// picked.
+#define CD_READ_MAX 64
+
+static bool rec_load(nvs_handle_t h, const char *uid_hex, cd_rec_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->idx  = -1;                    // defaults, for a record that predates a field
+    out->mode = CD_DAILY;
+
+    uint8_t buf[CD_READ_MAX];
+    size_t  sz = sizeof(buf);
+    if (nvs_get_blob(h, uid_hex, buf, &sz) != ESP_OK || sz == 0) return false;
+
+    memcpy(out, buf, (sz < sizeof(*out)) ? sz : sizeof(*out));
+    if (out->mode > CD_OFF) out->mode = CD_DAILY;   // stored value is input, not a promise
+    return true;
+}
 
 static void band_key(const uint8_t *uid, uint8_t len, char key[12])
 {
@@ -362,10 +432,8 @@ int countdown_get_mode(const char *uid_hex)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READONLY, &h) != ESP_OK) return CD_DAILY;
-    cd_rec_t rec = { 0 };
-    size_t len = sizeof(rec);
-    int mode = CD_DAILY;
-    if (nvs_get_blob(h, uid_hex, &rec, &len) == ESP_OK && rec.mode <= CD_OFF) mode = rec.mode;
+    cd_rec_t rec;
+    int mode = rec_load(h, uid_hex, &rec) ? rec.mode : CD_DAILY;
     nvs_close(h);
     return mode;
 }
@@ -375,9 +443,8 @@ void countdown_set_mode(const char *uid_hex, int mode)
     if (mode < CD_DAILY || mode > CD_OFF) mode = CD_DAILY;
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
-    cd_rec_t rec = { .day = 0, .idx = -1, .mode = CD_DAILY };
-    size_t len = sizeof(rec);
-    nvs_get_blob(h, uid_hex, &rec, &len);
+    cd_rec_t rec;
+    rec_load(h, uid_hex, &rec);        // best effort: defaults if absent
     rec.mode = (uint8_t)mode;
     nvs_set_blob(h, uid_hex, &rec, sizeof(rec));
     nvs_commit(h);
@@ -397,8 +464,8 @@ void countdown_reset_all(void)
         nvs_entry_info(it, &info);
         nvs_handle_t h;
         if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
-            cd_rec_t rec; size_t len = sizeof(rec);
-            if (nvs_get_blob(h, info.key, &rec, &len) == ESP_OK && rec.day != 0) {
+            cd_rec_t rec;
+            if (rec_load(h, info.key, &rec) && rec.day != 0) {
                 rec.day = 0;                    // keep idx + mode
                 nvs_set_blob(h, info.key, &rec, sizeof(rec));
                 nvs_commit(h);
@@ -416,14 +483,13 @@ void countdown_reset_today(const char *uid_hex)
 {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return;
-    cd_rec_t rec = { .day = 0, .idx = -1, .mode = CD_DAILY };
-    size_t len = sizeof(rec);
+    cd_rec_t rec;
     // Read to keep the band's mode and last-clip index, but write either way.
     // Conditioning the write on a successful read means a band with no record
-    // yet - or one whose stored blob doesn't match the current struct size, so
-    // nvs_get_blob returns INVALID_LENGTH - silently keeps its greeted-today
-    // mark, and the button on the page appears to do nothing at all.
-    nvs_get_blob(h, uid_hex, &rec, &len);        // best effort
+    // yet silently keeps its greeted-today mark, and the button on the page
+    // appears to do nothing at all. (rec_load also no longer throws away a
+    // record whose size doesn't match this build - see its comment.)
+    rec_load(h, uid_hex, &rec);                  // best effort
     rec.day = CD_FORCE;                          // not just "unmarked" - forced
     esp_err_t rc = nvs_set_blob(h, uid_hex, &rec, sizeof(rec));
     if (rc == ESP_OK) nvs_commit(h);
@@ -469,11 +535,10 @@ int countdown_due(const uint8_t *uid, uint8_t uid_len,
 
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return 0;
-    cd_rec_t rec = { .day = 0, .idx = -1, .mode = CD_DAILY };
-    size_t len = sizeof(rec);
-    nvs_get_blob(h, key, &rec, &len);
+    cd_rec_t rec;
+    rec_load(h, key, &rec);                      // defaults if absent or short
 
-    int mode = (rec.mode <= CD_OFF) ? rec.mode : CD_DAILY;
+    int mode = rec.mode;                         // rec_load already validated it
 
     // "Again today" on the web page sets this. It means play it on the next tap,
     // full stop - so it skips the once-a-day mark, the taper, and even an Off

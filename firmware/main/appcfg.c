@@ -47,6 +47,7 @@ void appcfg_load(device_config_t *cfg)
     cfg->mickey_leds       = MICKEY_LED_COUNT;
     cfg->ring_first        = RING_FIRST;
     strncpy(cfg->manifest_url, OTA_MANIFEST_URL, sizeof(cfg->manifest_url) - 1);
+    strncpy(cfg->audio_set, "trip", sizeof(cfg->audio_set) - 1);
     cfg->config_version    = APPCFG_VERSION;
 
     nvs_handle_t h;
@@ -71,6 +72,7 @@ void appcfg_load(device_config_t *cfg)
     cfg->ring_first        = get_u8(h, "led_rf", cfg->ring_first);
     get_str(h, "manif", cfg->manifest_url, sizeof(cfg->manifest_url));
     get_str(h, "assetu", cfg->assets_url, sizeof(cfg->assets_url));
+    get_str(h, "aset",   cfg->audio_set,  sizeof(cfg->audio_set));
     cfg->config_version    = (uint32_t)get_i32(h, "ver", cfg->config_version);
     nvs_close(h);
 
@@ -101,6 +103,7 @@ esp_err_t appcfg_save(const device_config_t *cfg)
     nvs_set_u8(h, "led_rf", cfg->ring_first ? 1 : 0);
     nvs_set_str(h, "manif", cfg->manifest_url);
     nvs_set_str(h, "assetu", cfg->assets_url);
+    nvs_set_str(h, "aset",   cfg->audio_set);
     nvs_set_i32(h, "ver", (int32_t)APPCFG_VERSION);
 
     r = nvs_commit(h);

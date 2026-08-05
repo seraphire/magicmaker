@@ -42,6 +42,13 @@ const char *wifi_device_id(void);
 // joining.
 void wifi_start_mdns(const char *instance);
 
+// Re-point the extra mDNS names ("magicmaker", "magicmaker-<id>") at the
+// current IP. They're delegated hostnames, which carry a literal address rather
+// than tracking the interface, so a new DHCP lease has to be pushed into them -
+// otherwise they keep answering with the old one, and a stale A record is worse
+// than no answer because it resolves. Called from the GOT_IP handler.
+void wifi_mdns_refresh_delegates(void);
+
 // The advertised mDNS hostname in use (without ".local") - e.g. "magic" for a
 // device named "magic". Empty string until wifi_start_mdns() has run.
 const char *wifi_hostname(void);

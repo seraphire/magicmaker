@@ -31,6 +31,43 @@ void audio_play(const char *path);
 // so their idea of "missing" matches the player's.
 bool audio_resolve(const char *path, char *out, size_t out_sz);
 
+// ---------------------------------------------------------------------------
+// Variant selection - the one place that knows "a name is a family of files".
+//
+// Three separate things were doing this and two of them were wrong in the same
+// way. A logical name stands for every clip behind it:
+//
+//     chime.mp3, chime-1.mp3, chime-2.mp3     ->  "chime" picks one of three
+//     cd/tail-1.mp3 ... cd/tail-13.mp3        ->  "cd/tail" picks one of thirteen
+//     chime-2.mp3                             ->  "chime-2" is a family of ONE
+//
+// That last line is why the trailing "-N" is NOT stripped: a stored path
+// pointing at a specific variant means "play exactly this", and pinning has to
+// keep working. Nor does it confuse a name that merely contains hyphens -
+// "be-our-guest" only splits on a suffix that is entirely digits.
+//
+// Enumerates by READING THE DIRECTORY, not by probing name-1, name-2 until
+// something is missing. Probing silently truncates a family at the first hole:
+// retire cd/tail-7 and tail-8 through tail-13 become unreachable, six of
+// thirteen closers gone with no error anywhere. Packs can now retire files, so
+// that hole is a thing a person can punch from another machine.
+// ---------------------------------------------------------------------------
+#define AUDIO_VARIANT_MAX 32
+
+// Variant numbers present for `logical`, ascending, where 0 means the bare name
+// (no -N suffix). Returns how many were written to `out`. Zero means nothing on
+// disk answers to that name at all.
+int audio_variants(const char *logical, uint8_t *out, int max);
+
+// Concrete path for one variant number, resolved to whichever extension is
+// actually on disk. False if that variant isn't there.
+bool audio_variant_path(const char *logical, uint8_t variant, char *out, size_t out_sz);
+
+// Pick one variant at random, avoiding `avoid` when the family has more than
+// one member (pass 0xFF for "no preference"). Writes the concrete path.
+// Returns the variant number chosen, or -1 if the family is empty.
+int audio_pick_variant(const char *logical, uint8_t avoid, char *out, size_t out_sz);
+
 // True from the moment audio_play() is called until the file finishes.
 bool audio_is_playing(void);
 

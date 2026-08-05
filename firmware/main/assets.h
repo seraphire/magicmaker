@@ -59,6 +59,19 @@ esp_err_t assets_sync_json(const char *manifest_json, int *n_updated);
 // A "firmware" object in a pack is ignored - firmware comes from manifest_url
 // only, so a mistyped or hostile assets_url cannot talk a device into
 // installing an image.
+//
+//   "include": [ "sets/xmas.json", "sets/hallow.json" ]
+//
+// Sub-packs, each an ordinary assets document, fetched and applied one at a
+// time. Three themed occasions take the bank past 270 files against a 128-entry
+// cap and a 16 KB buffer; splitting the document keeps peak memory flat where
+// growing the buffer would not. Relative paths resolve against the parent
+// manifest's directory. Depth 1 - an include inside an include is ignored.
+//
+// A failing sub-pack costs its own set, not the bank: the others still apply,
+// but the run fails so the pack version isn't recorded and the next check
+// retries. Per-set publishing falls out of this - tweaking one Christmas line
+// republishes ~6 KB instead of re-listing 270 unchanged clips.
 // `deferred` (optional) is set true when the firmware floor turned the sync
 // away. Without it, "0 files, no errors" reads identically to "already up to
 // date", which is the one thing a deferral must not look like.

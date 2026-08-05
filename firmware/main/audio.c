@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <strings.h>
+#include "esp_random.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -548,6 +551,120 @@ bool audio_resolve(const char *path, char *out, size_t out_sz)
     if (stat(cand, &st) != 0 || st.st_size <= 0) return false;
     if (out && out_sz) { strncpy(out, cand, out_sz - 1); out[out_sz - 1] = '\0'; }
     return true;
+}
+
+// --- variant selection ------------------------------------------------------
+// Split a logical path into its directory and its base name (extension removed,
+// "-N" suffix KEPT - see the header for why pinning depends on that).
+static void split_logical(const char *logical, char *dir, size_t dir_sz,
+                          char *base, size_t base_sz)
+{
+    const char *slash = strrchr(logical, '/');
+    if (slash) {
+        size_t n = (size_t)(slash - logical);
+        if (n >= dir_sz) n = dir_sz - 1;
+        memcpy(dir, logical, n);
+        dir[n] = '\0';
+        if (dir[0] == '\0') strncpy(dir, "/", dir_sz);   // file at the root
+        snprintf(base, base_sz, "%s", slash + 1);
+    } else {
+        snprintf(dir, dir_sz, ".");
+        snprintf(base, base_sz, "%s", logical);
+    }
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = '\0';
+}
+
+// Does `name` (already extension-stripped) belong to the family `base`?
+// Returns the variant number, or -1 for no.
+static int variant_of(const char *name, const char *base)
+{
+    size_t bl = strlen(base);
+    if (strcmp(name, base) == 0) return 0;                  // the bare name
+    if (strncmp(name, base, bl) != 0 || name[bl] != '-') return -1;
+
+    const char *num = name + bl + 1;
+    if (!*num) return -1;
+    for (const char *c = num; *c; c++)
+        if (*c < '0' || *c > '9') return -1;                // "be-our-guest": not digits
+    long v = strtol(num, NULL, 10);
+    return (v >= 0 && v < AUDIO_VARIANT_MAX) ? (int)v : -1;
+}
+
+int audio_variants(const char *logical, uint8_t *out, int max)
+{
+    if (!logical || !logical[0] || !out || max <= 0) return 0;
+
+    char dir[PATH_MAX_LEN], base[PATH_MAX_LEN];
+    split_logical(logical, dir, sizeof(dir), base, sizeof(base));
+
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    uint32_t seen = 0;                       // bitmap: variant N present
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char stem[64];
+        snprintf(stem, sizeof(stem), "%.63s", e->d_name);
+        char *dot = strrchr(stem, '.');
+        if (!dot) continue;                                  // audio always has one
+        if (strcasecmp(dot, ".wav") != 0 && strcasecmp(dot, ".mp3") != 0) continue;
+        *dot = '\0';
+
+        int v = variant_of(stem, base);
+        if (v >= 0) seen |= (1u << v);
+    }
+    closedir(d);
+
+    // Ascending, so variant numbers stay stable identities: countdown persists
+    // "the clip I used last" as this number, and it has to keep meaning the
+    // same clip across a pack that adds or retires others.
+    int n = 0;
+    for (int v = 0; v < AUDIO_VARIANT_MAX && n < max; v++)
+        if (seen & (1u << v)) out[n++] = (uint8_t)v;
+    return n;
+}
+
+bool audio_variant_path(const char *logical, uint8_t variant, char *out, size_t out_sz)
+{
+    if (!logical || !out || !out_sz) return false;
+
+    char dir[PATH_MAX_LEN], base[PATH_MAX_LEN];
+    // Sized so the compiler can PROVE no truncation: dir + '/' + base +
+    // "-NN.wav" can't reach this even at both buffers' worst case. It only
+    // has to survive as far as audio_resolve, which does its own bounds check.
+    char want[PATH_MAX_LEN * 3];
+    split_logical(logical, dir, sizeof(dir), base, sizeof(base));
+
+    if (variant == 0) snprintf(want, sizeof(want), "%s/%s.wav", dir, base);
+    else              snprintf(want, sizeof(want), "%s/%s-%u.wav", dir, base, (unsigned)variant);
+
+    return audio_resolve(want, out, out_sz);   // .wav here is logical; may land on .mp3
+}
+
+int audio_pick_variant(const char *logical, uint8_t avoid, char *out, size_t out_sz)
+{
+    uint8_t v[AUDIO_VARIANT_MAX];
+    int n = audio_variants(logical, v, AUDIO_VARIANT_MAX);
+    if (n <= 0) return -1;
+
+    // Draw from n-1 and step past the avoided one, rather than re-rolling.
+    // Re-rolling can spin on a family of two; stepping without the draw
+    // adjustment would make the clip after it twice as likely. This stays
+    // uniform over what's allowed.
+    int idx;
+    int avoid_idx = -1;
+    for (int i = 0; i < n; i++) if (v[i] == avoid) { avoid_idx = i; break; }
+
+    if (n > 1 && avoid_idx >= 0) {
+        idx = (int)(esp_random() % (uint32_t)(n - 1));
+        if (idx >= avoid_idx) idx++;
+    } else {
+        idx = (int)(esp_random() % (uint32_t)n);
+    }
+
+    if (!audio_variant_path(logical, v[idx], out, out_sz)) return -1;
+    return v[idx];
 }
 
 // ---------------------------------------------------------------------------

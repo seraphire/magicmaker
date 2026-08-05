@@ -22,6 +22,7 @@
 #include "ota.h"
 #include "assets.h"
 #include "app.h"          // app_moment_busy - don't start TLS mid-show
+#include <dirent.h>
 #include "countdown.h"
 #include "leds.h"
 #include "verscmp.h"
@@ -148,6 +149,57 @@ static int cmd_update_now(int argc, char **argv)
     } else {
         printf("Already up to date (running %s).\n", FW_VERSION);
     }
+    return 0;
+}
+
+// Show or switch the active occasion. Lists what's on the device by reading
+// /spiffs/cd/sets/, so it answers "what could I switch to" without guessing.
+static int cmd_audio_set(int argc, char **argv)
+{
+    device_config_t cfg;
+    appcfg_load(&cfg);
+
+    if (argc < 2) {
+        printf("Audio set: %s\n", cfg.audio_set[0] ? cfg.audio_set : "trip");
+        printf("Installed:\n");
+        DIR *d = opendir("/spiffs/cd/sets");
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL) {
+                if (e->d_name[0] == '.') continue;
+                char probe[80];
+                snprintf(probe, sizeof(probe), "/spiffs/cd/sets/%.32s", e->d_name);
+                DIR *sub = opendir(probe);
+                if (!sub) continue;                       // a stray file, not a set
+                int files = 0;
+                while (readdir(sub) != NULL) files++;
+                closedir(sub);
+                printf("  %-12s %d file(s)%s\n", e->d_name, files,
+                       strcmp(e->d_name, cfg.audio_set) == 0 ? "   <- active" : "");
+            }
+            closedir(d);
+        } else {
+            printf("  (none - /spiffs/cd/sets missing)\n");
+        }
+        printf("Switch with: audio-set <name>\n");
+        return 0;
+    }
+
+    if (strlen(argv[1]) >= sizeof(cfg.audio_set)) { printf("Name too long.\n"); return 1; }
+
+    // Refuse a set that isn't there. Accepting it would leave the countdown
+    // silent with nothing to say why - the numbers would still resolve, so it
+    // would half-work, which is the most confusing outcome available.
+    char probe[80];
+    snprintf(probe, sizeof(probe), "/spiffs/cd/sets/%.32s", argv[1]);
+    DIR *chk = opendir(probe);
+    if (!chk) { printf("No such set on this device: %s\n", argv[1]); return 1; }
+    closedir(chk);
+
+    snprintf(cfg.audio_set, sizeof(cfg.audio_set), "%s", argv[1]);
+    if (appcfg_save(&cfg) != ESP_OK) { printf("Save failed.\n"); return 1; }
+    countdown_set_audio_set(cfg.audio_set);
+    printf("Audio set is now %s\n", cfg.audio_set);
     return 0;
 }
 
@@ -400,7 +452,11 @@ static int cmd_update_mode(int argc, char **argv)
     webota_set_upload_enabled(on);
     if (on) {
         printf("Firmware upload ENABLED for this session.\n");
-        printf("  Web page : http://magicmaker-%s.local/update\n", wifi_device_id());
+        // wifi_hostname(), not "magicmaker-<id>": that form is only the fallback
+        // for an UNNAMED device. Once someone names it the hostname follows the
+        // name, and printing the id form sends them to an address that doesn't
+        // resolve - confidently, which is the worst way to be wrong.
+        printf("  Web page : http://%s.local/update\n", wifi_hostname());
         printf("  Or POST the .bin to  /ota  on that host.\n");
         printf("  Reboot the device to lock it again.\n");
     } else {
@@ -597,6 +653,12 @@ void cli_start(void)
         .help    = "Sync media/web assets to the manifest (no firmware, no reboot)",
         .func    = &cmd_sync_media,
     };
+    const esp_console_cmd_t audioset_cmd = {
+        .command = "audio-set",
+        .help    = "Show installed occasions, or switch the active one",
+        .hint    = "[<name>]",
+        .func    = &cmd_audio_set,
+    };
     const esp_console_cmd_t assetsurl_cmd = {
         .command = "assets-url",
         .help    = "Show or set the audio pack URL ('assets-url none' clears it)",
@@ -637,6 +699,7 @@ void cli_start(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&updatenow_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&syncmedia_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&assetsurl_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&audioset_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&countdown_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&selftest_cmd));
 #if WIFI_ENABLE
