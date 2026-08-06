@@ -43,6 +43,8 @@ Everything else on this page rides OTA. These don't.
   travels. This is the escape hatch that lets a breaking stored-data
   change ship without un-enrolling anybody, which is exactly why it belongs
   *here* and not in the nice-to-haves.
+  *Done and live in v1.4.0 — `GET /api/export`, `POST /api/import`, and the
+  Backup section on the Advanced tab.*
 - **#49 A blocked update should ask for help out loud** — an update the device
   cannot apply on its own (one needing a migration, or a `requires_fw` it can't
   reach) currently fails into the log, where nobody is looking. It should say
@@ -57,6 +59,7 @@ Everything else on this page rides OTA. These don't.
   the owner clicks, never as an automatic redirect — it arrives from the
   network, and the manifest signature covers the firmware hash, not that field.
   Pairs with #44: the notice's actual advice is "export your settings first".
+  *Done and live in v1.4.0.*
 
   **The clips** — recorded and installed as `Program/help-1..3.mp3`.
   `Program/`, not `cd/`: the countdown bank is split into shared numbers and
