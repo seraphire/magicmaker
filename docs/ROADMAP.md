@@ -110,6 +110,108 @@ Everything else on this page rides OTA. These don't.
 
 ## The theme system
 
+**Settled design — build this before recording into it.** Agreed in full; none
+of it is built yet. Doing it while `hallow` holds one file is the whole point.
+
+### Layout
+
+```
+/spiffs/
+├── cues/               chime, foolish, startours …   core / fallback
+├── Program/            the device's own voice
+├── cd/                 THE SHARED BANK
+│   ├── d1…d13  w1…w4  m1…m18  and
+│   ├── lead-1…3        "There's only" · "Just" · "Only"
+│   ├── tail-1…3        "and counting" · "to go" · "left"
+│   └── today  tomorrow "Today's the day!"
+└── sets/<id>/          THE THEME ROOT
+    ├── set.json
+    ├── cues/           masks core cues BY ID (merge, not replace)
+    ├── Program/        themed prompts
+    └── cd/             themed framing; masks the shared bank per family
+```
+
+- **`cues/`, not the partition root.** Short beats descriptive; a creaking door
+  isn't an "attraction", so the generic word wins in a public firmware.
+- **Safe to move because bands store ids, not paths** — what #17 bought.
+  `BOOT_SOUND_OPERATIONAL` moves with the rest: `operational` is both the boot
+  chime *and* an assignable cue, which is easy to miss.
+- **Cues merge per id; countdown families mask wholesale.** Deliberately
+  opposite rules. Cues are independent, so a small theme can override `chime`
+  and still offer core `startours`; full replacement would mean re-recording
+  eight clips before any theme worked. Countdown families are not independent —
+  a birthday closing with a Disney line reads as a glitch.
+- **The shared bank gains neutral framing.** Without it a themeless countdown
+  emits only `"six days"` — a fragment — and worse, `today`/`tomorrow` resolve
+  to nothing so it goes **completely silent on the day it must speak**. That's
+  a bug, not polish.
+
+### `set.json`
+
+```json
+{ "label": "Halloween", "icon": "🎃",
+  "strict": true, "countdown": true,
+  "hide": ["be-our-guest"],
+  "anim": { "chime": "ENCHANTED" } }
+```
+
+- **`strict`** — never borrow framing from the shared bank (numbers excepted).
+  Neutral shared framing is right for a themeless countdown, but it quietly
+  re-introduces mixed voices: a caretaker with no `tail-*` would borrow the
+  narrator's *"and counting"*. Strict makes a partial character set sound
+  sparse but consistently **him**, which is the better failure. Default
+  lenient — the casual case is "I made some music".
+- **`countdown: false`** — a theme with no countdown at all: cues and
+  animations only. An **occasion answers *when*; a set answers *what*,**
+  including whether it counts. Explicit rather than inferred from a missing
+  `cd/`, because "doesn't count" and "not recorded yet" must not look alike.
+- **`hide`** — let a character refuse a core cue that breaks the spell.
+- **`anim`** — the reason set.json exists at all: a themed chime otherwise
+  falls through to `ANIM_CELEBRATE`, bright and cheerful and exactly wrong for
+  a creaking door.
+
+### Occasions need a trailing window
+
+`occasion_t` gains **`trail_days`**: the window is `[date − lead, date + trail]`.
+Christmas is `lead 24, trail 7` — 1 December to 1 January. Without it an annual
+occasion rolls to next year the morning after, so **Santa vanishes on Boxing
+Day**, which is exactly when you still want him.
+
+Consequence worth writing down: *"annual occasions never need `after-*` or
+`tail-since`"* was only true at `trail = 0`. Inside a trailing window the count
+goes negative, and those families are precisely what handles it — Santa's
+*"three days since Christmas"*. Christmas needs them; Halloween at `trail: 1`
+barely does.
+
+### Counting
+
+| Days | Says | Why |
+|---|---|---|
+| 0 / 1 | full lines | today / tomorrow |
+| 2–13 | exact days — *"ten days"* | nobody says "one week and three days" for ten |
+| 14–27 | *"two weeks and three days"* | exactly where one unit lies; exact multiples drop the tail |
+| 28–59 | weeks, rounded | the remainder stops being interesting |
+| 60+ | months | |
+
+Today 25 days says *"four weeks"* — 28, a three-day lie, repeated across 25, 26
+and 27. **That, not the phrasing, is the bug.** Compound needs no new clips:
+`w2` + `and` + `d3`, and `and` already exists. The 13→14 boundary reads
+correctly counting down — yesterday *"two weeks"*, today *"thirteen days"*
+feels like progress.
+
+A caretaker/Santa bank is therefore **`d1`–`d13`, `w1`–`w4`, `and`** = 18 clips,
+plus framing. Numbers are the one deliberate compromise: shared means the
+character says *"Only…"* and the narrator says *"six days"*, so a character
+theme should ship its own.
+
+### Turning a published event off
+
+`OCC_F_ENABLED` exists but is not enough. A pushed schedule that rewrites the
+record erases the owner's choice, so it needs a **second bit, `OCC_F_USER_OFF`,
+that a push may never clear.** Off wins. One boolean owned by two authorities
+always loses the owner. If Joe doesn't want Halloween, that has to survive every
+future sync or the switch isn't worth having.
+
 - **#37 Let a theme own the card sounds** — unblocked now that bands store an id
   rather than a path. `sounds_init` scans the active set as well as core and
   masks by id. This is what makes a Halloween `chime` a creaking door.
