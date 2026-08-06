@@ -1,14 +1,15 @@
 {
   "manifest_url": "https://raw.githubusercontent.com/seraphire/magicmaker/ota/manifest.json",
   "firmware": {
-    "version": "1.3.0",
-    "url": "https://github.com/seraphire/magicmaker/releases/download/v1.3.0/firmware.bin",
-    "sha256": "c88fb6a1a49b17c64b87fa25bab00e17b2d1ff7732e7b444f4706fcec2afe54b"
+    "version": "1.4.0",
+    "url": "https://github.com/seraphire/magicmaker/releases/download/v1.4.0/firmware.bin",
+    "sha256": "f4d5bf90f4f8422f46174a80c263b6903c397bb40634ccdaede2b7c40b38aa0f",
+    "sig": "MEUCIGyAxclz+N329E2Fl/6/vfOgbp/2tRk9py+v1LIeC0chAiEA/Bw8x/0nHwr3JsfrVDYFIFhYDkqs9VIw5v0+e+DIPM8="
   },
   "assets": {
-    "base_url": "https://raw.githubusercontent.com/seraphire/magicmaker/v1.3.0/firmware/spiffs/",
+    "base_url": "https://raw.githubusercontent.com/seraphire/magicmaker/v1.4.0/firmware/spiffs/",
     "files": [
-      { "path": "www/index.html", "sha256": "63a9ff1342809477cdfde26a781502f024bf1b2da6efe23162e7232dc74ea998", "bytes": 22084 }
+      { "path": "www/index.html", "sha256": "d233b9e54d2f5b26e7cec9ea676d938debc707bf7a69a8a7132bfc02d21fef4e", "bytes": 26500 }
     ]
   }
 }
