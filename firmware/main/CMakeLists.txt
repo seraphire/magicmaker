@@ -17,6 +17,8 @@ idf_component_register(
         "webota.c"
         "assets.c"
         "countdown.c"
+        "occasions.c"
+        "needhelp.c"
         "sounds.c"
         "bands.c"
     INCLUDE_DIRS "."

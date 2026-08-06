@@ -65,6 +65,18 @@ typedef struct {
     // audio plays, nothing about who can reach the device.
     char audio_set[16];
 
+    // What slot 0 is called. "The trip" was baked into the firmware, which made
+    // the one occasion every device definitely has the only one that couldn't
+    // be renamed - and a reader that outlives this trip needs to count down to
+    // something else without a rebuild.
+    char trip_label[32];
+
+    // One emoji for the trip, UTF-8. The stored occasions carry their own; the
+    // trip's lives here because slot 0 is synthesised from this config rather
+    // than stored as a record - see occasions.h. Sixteen bytes for the reason
+    // given there: an emoji is rarely one character.
+    char trip_icon[16];
+
     uint32_t config_version;
 } device_config_t;
 

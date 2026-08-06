@@ -5,6 +5,11 @@
 #include "esp_crt_bundle.h"
 #include "esp_ota_ops.h"
 #include "esp_https_ota.h"
+#include "esp_partition.h"
+#include "mbedtls/sha256.h"
+#include "mbedtls/pk.h"
+#include "ota_pubkey.h"
+#include <strings.h>
 #include "esp_log.h"
 #include "cJSON.h"
 #include "verscmp.h"
@@ -158,14 +163,26 @@ int ota_parse_manifest(const char *json, ota_manifest_t *out)
     // Falls back to the legacy flat shape {"version":..,"firmware_url":..} so old
     // manifests (and the on-device selftest) still parse.
     cJSON *fwobj = cJSON_GetObjectItem(root, "firmware");
-    cJSON *ver, *fw;
+    cJSON *ver, *fw, *sha, *sig;
     if (cJSON_IsObject(fwobj)) {
         ver = cJSON_GetObjectItem(fwobj, "version");
         fw  = cJSON_GetObjectItem(fwobj, "url");
+        sha = cJSON_GetObjectItem(fwobj, "sha256");
+        sig = cJSON_GetObjectItem(fwobj, "sig");
     } else {
         ver = cJSON_GetObjectItem(root, "version");
         fw  = cJSON_GetObjectItem(root, "firmware_url");
+        sha = cJSON_GetObjectItem(root, "sha256");
+        sig = cJSON_GetObjectItem(root, "sig");
     }
+    out->sha256[0] = '\0';
+    if (cJSON_IsString(sha) && strlen(sha->valuestring) == 64) {
+        strncpy(out->sha256, sha->valuestring, sizeof(out->sha256) - 1);
+        out->sha256[sizeof(out->sha256) - 1] = '\0';
+    }
+    out->sig[0] = '\0';
+    if (cJSON_IsString(sig) && strlen(sig->valuestring) < sizeof(out->sig))
+        strcpy(out->sig, sig->valuestring);
     // Optional self-relocation pointer - parsed regardless of the firmware
     // section (a manifest may relocate without shipping firmware).
     out->manifest_url[0] = '\0';
@@ -204,7 +221,95 @@ static bool url_scheme_ok(const char *url)
     return strncmp(url, "https://", 8) == 0 || strncmp(url, "http://", 7) == 0;
 }
 
-esp_err_t ota_install_from_url(const char *url)
+// Hash `len` bytes of the slot the image was just written to.
+//
+// Read back from flash rather than hashed on the way in, because
+// esp_https_ota owns the stream - it handles the redirect chain to GitHub's CDN
+// and the TLS session, and reimplementing that to get at the bytes would trade
+// a real risk for a cosmetic one. What landed on flash is also the thing we
+// actually care about: a download that hashed correctly but wrote badly is
+// still a broken image.
+static esp_err_t hash_written_image(size_t len, char out_hex[65], uint8_t out_raw[32])
+{
+    const esp_partition_t *p = esp_ota_get_next_update_partition(NULL);
+    if (!p || len == 0 || len > p->size) return ESP_ERR_INVALID_SIZE;
+
+    uint8_t *buf = malloc(4096);
+    if (!buf) return ESP_ERR_NO_MEM;
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+
+    esp_err_t r = ESP_OK;
+    for (size_t off = 0; off < len; ) {
+        size_t n = len - off;
+        if (n > 4096) n = 4096;
+        r = esp_partition_read(p, off, buf, n);
+        if (r != ESP_OK) break;
+        mbedtls_sha256_update(&sha, buf, n);
+        off += n;
+    }
+
+    unsigned char digest[32];
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    free(buf);
+
+    if (r != ESP_OK) return r;
+    if (out_raw) memcpy(out_raw, digest, 32);
+    static const char *hx = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) { out_hex[i*2] = hx[digest[i] >> 4]; out_hex[i*2+1] = hx[digest[i] & 0xF]; }
+    out_hex[64] = '\0';
+    return ESP_OK;
+}
+
+// Base64 -> bytes. Small and local; mbedtls_base64_decode would pull the whole
+// module in for one call site.
+static int b64_decode(const char *in, uint8_t *out, size_t out_sz)
+{
+    static const char *A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    uint32_t acc = 0; int bits = 0; size_t n = 0;
+    for (const char *p = in; *p; p++) {
+        if (*p == '=' || *p == '\n' || *p == '\r' || *p == ' ') continue;
+        const char *q = strchr(A, *p);
+        if (!q) return -1;                       // not base64 - reject, don't guess
+        acc = (acc << 6) | (uint32_t)(q - A);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (n >= out_sz) return -1;
+            out[n++] = (uint8_t)(acc >> bits);
+        }
+    }
+    return (int)n;
+}
+
+// Is `sig_b64` a valid signature, by our key, over `digest`?
+//
+// The signature covers the image's SHA-256 rather than the manifest as a whole,
+// so the manifest stays editable - retitle a release, add an asset, relocate the
+// host - without re-signing. What's signed is the only thing that must not
+// change: which bytes are the firmware.
+static bool sig_ok(const uint8_t digest[32], const char *sig_b64)
+{
+    uint8_t sig[96];
+    int siglen = b64_decode(sig_b64, sig, sizeof(sig));
+    if (siglen <= 0) { ESP_LOGE(TAG, "signature is not valid base64"); return false; }
+
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    int r = mbedtls_pk_parse_public_key(&pk, OTA_PUBKEY_DER, sizeof(OTA_PUBKEY_DER));
+    if (r != 0) { ESP_LOGE(TAG, "built-in public key won't parse (%d)", r); mbedtls_pk_free(&pk); return false; }
+
+    r = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, digest, 32, sig, (size_t)siglen);
+    mbedtls_pk_free(&pk);
+    if (r != 0) { ESP_LOGE(TAG, "signature does NOT verify (mbedtls %d)", r); return false; }
+    return true;
+}
+
+esp_err_t ota_install_from_url(const char *url, const char *expect_sha256,
+                               const char *expect_sig)
 {
     if (!url || !url_scheme_ok(url)) {
         ESP_LOGE(TAG, "refusing non-http(s) url");
@@ -229,9 +334,76 @@ esp_err_t ota_install_from_url(const char *url)
     };
 
     ESP_LOGI(TAG, "OTA download: %s", url);
-    esp_err_t r = esp_https_ota(&cfg);       // stream -> slot, validate, set boot
+
+    // The step-by-step API rather than the one-shot esp_https_ota(), for one
+    // reason: the one-shot call sets the boot partition itself, so there is no
+    // moment between "the image is on flash" and "the device will boot it" in
+    // which to check anything. Here finish() is ours to withhold.
+    esp_https_ota_handle_t h = NULL;
+    esp_err_t r = esp_https_ota_begin(&cfg, &h);
+    if (r != ESP_OK) { ESP_LOGE(TAG, "OTA begin failed: %s", esp_err_to_name(r)); return r; }
+
+    while ((r = esp_https_ota_perform(h)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) { }
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "OTA download failed: %s", esp_err_to_name(r));
+        esp_https_ota_abort(h);
+        return r;
+    }
+    if (!esp_https_ota_is_complete_data_received(h)) {
+        ESP_LOGE(TAG, "OTA download truncated - discarding");
+        esp_https_ota_abort(h);
+        return ESP_FAIL;
+    }
+
+    // One hash, two questions. Identity: is this the image the manifest named?
+    // Authenticity: did the key-holder say so? Both answered here, in the gap
+    // between "written to flash" and "will boot", which is the whole reason
+    // finish() is withheld above.
+    {
+        int len = esp_https_ota_get_image_len_read(h);
+        char got[65];
+        uint8_t digest[32];
+        if (len <= 0 || hash_written_image((size_t)len, got, digest) != ESP_OK) {
+            ESP_LOGE(TAG, "could not hash the written image - discarding");
+            esp_https_ota_abort(h);
+            return ESP_FAIL;
+        }
+
+        if (expect_sha256 && expect_sha256[0]) {
+            if (strcasecmp(got, expect_sha256) != 0) {
+                // Never reached the boot partition, so the running firmware is
+                // untouched and the next check simply tries again.
+                ESP_LOGE(TAG, "sha256 MISMATCH - refusing to install");
+                ESP_LOGE(TAG, "  manifest %.16s...  image %.16s...", expect_sha256, got);
+                esp_https_ota_abort(h);
+                return ESP_FAIL;
+            }
+            ESP_LOGI(TAG, "image sha256 verified (%.16s...)", got);
+        } else {
+            ESP_LOGW(TAG, "manifest carries no sha256");
+        }
+
+        // Unsigned is REFUSED, not merely warned about. A check that can be
+        // skipped by omitting a field is not a check - anyone able to serve a
+        // manifest could simply leave the signature out. The escape hatch is
+        // the AP upload, which reaches a different function entirely.
+        if (!expect_sig || !expect_sig[0]) {
+            ESP_LOGE(TAG, "manifest is UNSIGNED - refusing to install over the air");
+            ESP_LOGE(TAG, "  (to install anyway: hold the button at power-on and upload it)");
+            esp_https_ota_abort(h);
+            return ESP_FAIL;
+        }
+        if (!sig_ok(digest, expect_sig)) {
+            ESP_LOGE(TAG, "signature check FAILED - refusing to install");
+            esp_https_ota_abort(h);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "signature verified - image is ours");
+    }
+
+    r = esp_https_ota_finish(h);             // validates the header, sets boot
     if (r == ESP_OK) ESP_LOGI(TAG, "image installed - reboot to run it");
-    else             ESP_LOGE(TAG, "OTA download/install failed: %s", esp_err_to_name(r));
+    else             ESP_LOGE(TAG, "OTA finish failed: %s", esp_err_to_name(r));
     return r;
 }
 
@@ -311,7 +483,7 @@ esp_err_t ota_update_from_manifest(const char *manifest_url,
                      cur_version, m.version);
         } else {
             ESP_LOGI(TAG, "updating %s -> %s from %s", cur_version, m.version, m.firmware_url);
-            rc = ota_install_from_url(m.firmware_url);
+            rc = ota_install_from_url(m.firmware_url, m.sha256, m.sig);
             if (rc == ESP_OK) {
                 if (installed) *installed = true;
                 // A manifest-driven update is *self-initiated*, not "unexpectedly

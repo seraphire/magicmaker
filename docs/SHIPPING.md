@@ -107,14 +107,24 @@ changed files, then scan **every staged file**, not just the ones you expect to
 be risky:
 
 ```powershell
-# from C:\DEV\Disney-Magic-Band — audits the ENTIRE public repo, not just a diff
+# from C:\DEV\Disney-Magic-Band — audits every TRACKED file, not just a diff
 $pat = Get-Content workshop\docs\private-patterns.txt | Where-Object {$_}
-Get-ChildItem MagicMaker -Recurse -File -Include *.md,*.c,*.h,*.ps1,*.html |
-  ForEach-Object {
-    $h = Select-String -Path $_.FullName -Pattern $pat -List -ErrorAction SilentlyContinue
-    if ($h) { "LEAK  $($_.Name) : $($h.Line.Trim())" }
+$hits = foreach ($f in (git -C MagicMaker ls-files)) {
+  $p = Join-Path 'MagicMaker' $f
+  if (Test-Path $p) {
+    $h = Select-String -Path $p -Pattern $pat -List -ErrorAction SilentlyContinue
+    if ($h) { "LEAK  $f : $($h.Line.Trim())" }
   }
+}
+if ($hits) { $hits } else { "CLEAN" }
 ```
+
+**`git ls-files`, not `Get-ChildItem`.** Walking the filesystem drags in
+`firmware\build\`, which is gitignored and full of local toolchain paths with a
+username in them — eight confident LEAK lines that publish nothing, every single
+run. A check that cries wolf trains you to skim past the one time it matters,
+which is exactly the failure this check exists to prevent. Only tracked files
+can leak, so only tracked files are worth scanning.
 
 Scanning the whole repo rather than the staged diff costs nothing and catches
 what a diff can't: something that leaked in an earlier session and has been
@@ -157,6 +167,25 @@ straps. Asserting them drops the chip into the ROM bootloader and it goes dark.
 **A sync during a moment cuts the audio off mid-word.** Handled now — the CLI
 waits — but it's why a sync fired seconds after boot used to truncate the
 greeting.
+
+**Flashing an edited `www\index.html` looks like it does nothing.** The manifest
+publishes the page as an *asset* (`www/index.html`, served from the release
+tag), so on the next sync the device downloads the published copy straight back
+over the one you just flashed. Every diagnostic points the wrong way: the image
+is right, `verify_flash` passes, the file extracts from the image at the new
+size — and the device still serves the old page, because it re-fetched it
+seconds after boot.
+
+The tell is `stat()` reporting the *published* byte count rather than your
+file's. There is no local-override mode: **to see a page change on a device
+with a manifest URL set, you have to publish it.** Verify the markup by
+syntax-checking the script offline first —
+
+```bash
+node --check page.js
+```
+
+— because the first real look you get is after it has shipped.
 
 **Publishing reaches your bench device too.** Its manifest URL is the real one,
 so it will install and reboot on its own. "Publish" and "test on the bench" are

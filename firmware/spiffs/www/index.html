@@ -80,6 +80,10 @@ font-size:.9em;border:1px solid transparent;}
 #devstate .dot{display:inline-block;width:.55em;height:.55em;border-radius:50%;
 margin-right:.45em;vertical-align:baseline;background:currentColor;}
 #devstate.busy .dot{animation:pulse 1.1s ease-in-out infinite;}
+#helpnote{margin:.7em 0 0;padding:.6em .8em;border-radius:.4em;
+  background:var(--dangBg);color:var(--dangFg);border:1px solid var(--dangBg);}
+#helpnote p{margin:.35em 0 0;}
+#helpnote a{color:inherit;}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
 /* --- tabs ------------------------------------------------------------- */
 nav.tabs{display:flex;gap:.25em;margin:.8em 0 .2em;border-bottom:1px solid var(--line);
@@ -127,6 +131,17 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
 </header>
 
 <div id="devstate"></div>
+
+<!-- The device is asking for a person. Its own element rather than reusing
+     #devstate: that one is transient ("busy", "can't reach it") and is cleared
+     on the next good poll, whereas this stays until the cause is fixed. Sharing
+     one banner meant whichever wrote last won, and a moment of lights would
+     have wiped the only notice that needed reading. -->
+<div id="helpnote" hidden>
+  <strong>&#9888; I need a hand</strong>
+  <p id="helptext"></p>
+  <p class="hint">Take a backup first &mdash; <a href="#" id="helpJump">jump to Backup</a>.</p>
+</div>
 
 <nav class="tabs" id="tabs">
   <button type="button" data-tab="trip"  aria-selected="true">Trip</button>
@@ -182,6 +197,18 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
   {{ADMIN}}
   <p><button type="button" class="rowbtn" id="rebootBtn">&#8635; Reboot device</button>
   <span class="hint" id="rebootMsg"></span></p>
+
+  <h2 id="backup">Backup</h2>
+  <p class="hint">Saves your trip, your occasions, every band&rsquo;s name and sound,
+  and how the lights are set up &mdash; as one small file. Do this before an update
+  that asks you to.</p>
+  <p class="hint">Your Wi-Fi is deliberately not in the file: neither the password
+  nor the network name. If you ever need to set Wi-Fi up again, hold the button
+  while powering on.</p>
+  <p><a class="rowbtn" href="/api/export" download="magicmaker-settings.json">&#8681; Download settings</a></p>
+  <p><button type="button" class="rowbtn" id="importBtn">&#8679; Restore from a file&hellip;</button>
+  <input type="file" id="importFile" accept="application/json,.json" hidden>
+  <span class="hint" id="importMsg"></span></p>
 </div>
 
 <div class="panel" data-tab="bands" hidden>
@@ -220,6 +247,11 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
     try{ localStorage.setItem('mm-tab',name); }catch(e){}
   }
   nav.onclick=function(e){ var b=e.target.closest('button'); if(b) show(b.getAttribute('data-tab')); };
+  // Published on purpose: the "I need a hand" notice sits outside the tabs and
+  // has to be able to send you to the Backup section, which lives inside one.
+  // One deliberate export beats another block reaching in and re-implementing
+  // the panel/aria/localStorage bookkeeping slightly differently.
+  window.mmShowTab = show;
   var start='trip';
   try{ var s=localStorage.getItem('mm-tab');
        if(s&&nav.querySelector('[data-tab="'+s+'"]')) start=s; }catch(e){}
@@ -344,6 +376,57 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
       stateEl.innerHTML='<span class="dot"></span>'+text;
     }
 
+    // The device's own words, as TEXT. textContent, never innerHTML: the string
+    // is built on the device from a version number that came off the network,
+    // and a status message is never worth an injection point.
+    //
+    // Only touched when it changes, so a notice you are mid-way through reading
+    // isn't rebuilt under you every two seconds.
+    var helpEl=document.getElementById('helpnote'),
+        helpTx=document.getElementById('helptext'), lastHelp=null;
+    function setHelp(msg){
+      msg = msg || '';
+      if(msg===lastHelp) return;
+      lastHelp=msg;
+      helpTx.textContent=msg;
+      helpEl.hidden = !msg;
+    }
+    document.getElementById('helpJump').onclick=function(e){
+      e.preventDefault();
+      if(window.mmShowTab) window.mmShowTab('adv');
+      document.getElementById('backup').scrollIntoView({behavior:'smooth'});
+    };
+
+    // Restore. Read locally and posted as-is - the device validates it, and
+    // duplicating those rules here would only give two places to disagree.
+    var impBtn=document.getElementById('importBtn'),
+        impFile=document.getElementById('importFile'),
+        impMsg=document.getElementById('importMsg');
+    impBtn.onclick=function(){ impFile.click(); };
+    impFile.onchange=function(){
+      var f=impFile.files&&impFile.files[0]; if(!f) return;
+      // Asked before anything is sent, not after: restoring replaces the
+      // occasions outright, and someone picking the wrong file deserves the
+      // chance to say no while it still costs nothing.
+      if(!confirm('Restore settings from "'+f.name+'"?\n\nYour occasions will be replaced by the ones in this file. Bands are merged, not removed.')){
+        impFile.value=''; return;
+      }
+      impMsg.textContent='Restoring…';
+      var fr=new FileReader();
+      fr.onload=function(){
+        fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:fr.result})
+          .then(function(r){ return r.ok ? r.json() : r.text().then(function(t){ throw new Error(t||('HTTP '+r.status)); }); })
+          .then(function(j){
+            impMsg.textContent='Restored '+j.bands+' band(s) and '+j.occasions+' occasion(s).';
+            load();
+          })
+          .catch(function(e){ impMsg.textContent='Could not restore: '+e.message; })
+          .then(function(){ impFile.value=''; });   // so the same file can be picked again
+      };
+      fr.onerror=function(){ impMsg.textContent='Could not read that file.'; impFile.value=''; };
+      fr.readAsText(f);
+    };
+
     function poll(){
       // Don't stack requests: if the device is busy and a reply is slow, a
       // plain interval piles more on top exactly when it can least cope.
@@ -369,6 +452,7 @@ background:var(--btn2Bg);color:var(--btn2Fg);font-weight:normal;}
             return;
           }
           setState(null);
+          setHelp(s.help);
           if(lastN===null){ lastN=s.n; return; }   // first reply: sync, don't re-fetch
           if(s.n!==lastN){ lastN=s.n; load(); }
         })

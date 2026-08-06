@@ -48,6 +48,8 @@ void appcfg_load(device_config_t *cfg)
     cfg->ring_first        = RING_FIRST;
     strncpy(cfg->manifest_url, OTA_MANIFEST_URL, sizeof(cfg->manifest_url) - 1);
     strncpy(cfg->audio_set, "trip", sizeof(cfg->audio_set) - 1);
+    strncpy(cfg->trip_label, "The trip", sizeof(cfg->trip_label) - 1);
+    strncpy(cfg->trip_icon, "\xF0\x9F\x8F\xB0", sizeof(cfg->trip_icon) - 1);  // castle
     cfg->config_version    = APPCFG_VERSION;
 
     nvs_handle_t h;
@@ -73,10 +75,17 @@ void appcfg_load(device_config_t *cfg)
     get_str(h, "manif", cfg->manifest_url, sizeof(cfg->manifest_url));
     get_str(h, "assetu", cfg->assets_url, sizeof(cfg->assets_url));
     get_str(h, "aset",   cfg->audio_set,  sizeof(cfg->audio_set));
+    get_str(h, "tlabel", cfg->trip_label, sizeof(cfg->trip_label));
+    get_str(h, "ticon",  cfg->trip_icon,  sizeof(cfg->trip_icon));
     cfg->config_version    = (uint32_t)get_i32(h, "ver", cfg->config_version);
     nvs_close(h);
 
-    ESP_LOGI(TAG, "Loaded config: ssid='%s' name='%s' trip=%04d-%02d-%02d",
+    // Debug, not info: occ_get() synthesises the trip occasion from this config
+    // on every call, so listing the occasions - or deciding which one speaks on
+    // a tap - loads it eight times and buried the actual event in a wall of
+    // identical lines. The read itself is cheap (NVS keeps its own page cache);
+    // it was only ever the logging that made it look expensive.
+    ESP_LOGD(TAG, "Loaded config: ssid='%s' name='%s' trip=%04d-%02d-%02d",
              cfg->wifi_ssid, cfg->device_name,
              cfg->trip_year, cfg->trip_month, cfg->trip_day);
 }
@@ -104,6 +113,8 @@ esp_err_t appcfg_save(const device_config_t *cfg)
     nvs_set_str(h, "manif", cfg->manifest_url);
     nvs_set_str(h, "assetu", cfg->assets_url);
     nvs_set_str(h, "aset",   cfg->audio_set);
+    nvs_set_str(h, "tlabel", cfg->trip_label);
+    nvs_set_str(h, "ticon",  cfg->trip_icon);
     nvs_set_i32(h, "ver", (int32_t)APPCFG_VERSION);
 
     r = nvs_commit(h);

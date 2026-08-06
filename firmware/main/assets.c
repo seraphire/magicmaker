@@ -15,8 +15,25 @@
 #include "mbedtls/sha256.h"
 #include "ota.h"          // ota_http_get - one HTTP fetch helper, not two
 #include "verscmp.h"
+#include "needhelp.h"
 
 static const char *TAG = "assets";
+
+// The firmware version the last DEFERRED sync asked for; "" when nothing is
+// being held back. RAM only - it is a fact about the last sync, not a setting,
+// and the next sync is the authority on whether it is still true.
+static char s_requires[24] = "";
+
+// The "needs a person" state is raised and cleared HERE rather than by each
+// caller, because there is more than one caller - the periodic network task and
+// the `sync-media` console command - and the first version only did it in one.
+// The console sync then succeeded while the reader carried on asking for help
+// about a problem it had just confirmed was gone. A fact belongs to the code
+// that establishes it, not to whoever remembers to ask.
+//
+// A FAILED fetch deliberately changes nothing: unreachable is not "needs a
+// person", and a previously known deferral is still true while the host is
+// down. Only a sync that actually read the manifest gets an opinion.
 
 #define MOUNT          "/spiffs"
 #define INSTALLED_PATH MOUNT "/installed.json"
@@ -406,6 +423,8 @@ static void pack_state_set(const char *url, const char *ver)
     cJSON_Delete(inst);
 }
 
+const char *assets_pack_requires(void) { return s_requires; }
+
 void assets_pack_version(char *out, size_t sz)
 {
     pack_state_get(NULL, 0, out, sz);
@@ -455,7 +474,9 @@ esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
 {
     if (n_updated) *n_updated = 0;
     if (deferred) *deferred = false;
-    if (!url || !url[0]) return ESP_OK;                    // no pack configured: nothing to do
+
+    // No pack configured: nothing can be held back, so nothing to ask about.
+    if (!url || !url[0]) { needhelp_clear(); return ESP_OK; }
 
     char *json = malloc(PACK_MAX);
     if (!json) return ESP_FAIL;
@@ -472,10 +493,14 @@ esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
     if (cJSON_IsString(req) && cur_fw && version_cmp(cur_fw, req->valuestring) < 0) {
         ESP_LOGW(TAG, "pack needs firmware %s (running %s) - skipping until we qualify",
                  req->valuestring, cur_fw);
+        snprintf(s_requires, sizeof(s_requires), "%s", req->valuestring);
         if (deferred) *deferred = true;
+        needhelp_set(HELP_PACK_FW, s_requires);
         cJSON_Delete(root);
         return ESP_OK;
     }
+    s_requires[0] = '\0';      // we qualify: nothing is being held back
+    needhelp_clear();
 
     // Version short-circuit. Only meaningful paired with the URL it came from,
     // and only sound when nothing has changed on the device: it says "the

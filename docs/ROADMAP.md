@@ -20,6 +20,8 @@ Everything else on this page rides OTA. These don't.
   there's nothing to fall out of sync. `flags` carries managed-vs-user, so a
   pushed schedule never stomps something the owner added.
   **Changes stored data — that's why it's here rather than later.**
+  *Done in firmware (`occasions.c`, `occasion` CLI) as of 87ec94f. Still to
+  do: the web page only edits the trip, so slots 1–7 are console-only.*
 - **#36 Tap rhythm: one spoken thing per tap** — a tap is always the band's
   sound, then *at most one* spoken thing: the nearest occasion that hasn't
   spoken today, else a cheeky line on the third consecutive tap, else nothing.
@@ -29,18 +31,95 @@ Everything else on this page rides OTA. These don't.
 - **#31 Help band** — one clip, one enrollment, no firmware. Now that
   `magicmaker.local` is permanent the script can name it and stay true. Wants
   the `quiet` flag from #36 or it ends with "…and it's 42 days to go!"
+- **#44 Export / import the settings as one JSON file** — `GET /export` serves
+  everything the owner chose (config, enrollments, per-band countdown modes,
+  occasions); `POST /import` puts it back. An **endpoint, not a scrape of the
+  rendered page**: the page shows only what it happens to draw, and it breaks
+  every time the HTML does. Carries a schema version so import can migrate
+  rather than guess, and carries **no Wi-Fi at all** — not the password, and
+  not the SSID: it could never be imported (a network name without its password
+  takes the device offline, the one state the page can't undo), so carrying it
+  bought nothing and put the name of somebody's home network in a file that
+  travels. This is the escape hatch that lets a breaking stored-data
+  change ship without un-enrolling anybody, which is exactly why it belongs
+  *here* and not in the nice-to-haves.
+- **#49 A blocked update should ask for help out loud** — an update the device
+  cannot apply on its own (one needing a migration, or a `requires_fw` it can't
+  reach) currently fails into the log, where nobody is looking. It should say
+  so: a clip on the next tap, plus a notice on the config page carrying the
+  release's own `help_url` from the manifest.
+  **The spoken clip must never contain a URL.** It says "open magicmaker dot
+  local" — a name the device already answers to and which cannot change — and
+  the page carries the link. A clip that names a URL has to be re-recorded
+  every time the URL moves, and a spoken URL is unusable anyway.
+  Two things to get right: rate-limit it, or a device that can't update nags at
+  every tap until it's unplugged; and render `help_url` as visible text that
+  the owner clicks, never as an automatic redirect — it arrives from the
+  network, and the manifest signature covers the firmware hash, not that field.
+  Pairs with #44: the notice's actual advice is "export your settings first".
+
+  **The clips** — recorded and installed as `Program/help-1..3.mp3`.
+  `Program/`, not `cd/`: the countdown bank is split into shared numbers and
+  per-occasion sets, and this belongs to neither — it isn't about an occasion
+  and it would have had to squat in `cd/num/` to be found. `Program/` is
+  already where the device's own voice lives, next to `update-failed` and
+  `browse-magicmaker`.
+  A pool of three for the same reason every other pool exists: this plays after
+  *every* scan until it's dealt with, and one identical line repeated is
+  nagging where three is a character asking for help.
+
+  | | |
+  |---|---|
+  | 1 | "I could use a little help! Please have an adult visit Magic Maker dot local, so we can keep the magic alive." |
+  | 2 | "Psst — could a grown-up visit Magic Maker dot local? I need a hand to keep the magic going." |
+  | 3 | "I'm still working, but I need a grown-up at Magic Maker dot local before I can do something new." |
+
+  Recorded as "Magic Maker dot local", spoken as two words — read as one it
+  comes out "magicmakerdotlocal" and nobody can type it back.
+
+  Note what these DON'T say: no version number, no what's-wrong, no URL beyond
+  the device's own permanent name. All of that changes; the clip can't. It goes
+  on the page, where it can be rewritten in a release instead of re-recorded.
 - Physical: a power brick in the box; swap *test tag* / *Tomorrow Transit* for
   the real cards.
+
+- **#45 Card and set artwork in the web UI** — storage is *not* the blocker:
+  the partition holds 1.9 MB of 9.9 MB, so ~8 MB free is room for hundreds of
+  thumbnails at ~20 KB each. The cost is plumbing — upload, a size ceiling
+  enforced on the device, serving, and a resize step that has to happen off the
+  device because an ESP32 will not scale a phone photo. Ships alongside the
+  emoji (#46), which stays as the zero-cost default: an emoji is drawn by the
+  viewer's phone, so it never needs uploading, caching or serving at all.
+- **#47 Occasions beyond what the device can hold** — sixteen slots covers
+  Christmas, Halloween, the trip and two birthdays with room to spare, but a
+  fixed list on the device is the wrong long-term shape: the answer is a
+  *pushed schedule* the device caches, holding only what's near-term and
+  taking the rest from #38. `OCC_F_MANAGED` already exists as the hook, and
+  #44's export/import is the offline half of the same need. Until then, raising
+  a constant is the honest stopgap and should be called one.
+- **#48 Slot 0 should stop being special** — it's synthesised from appcfg so
+  nothing had to migrate, which was right for shipping and is wrong forever:
+  the one occasion every device definitely has is the only one that can't be
+  deleted, reordered, or given a lead window. Fold it into a real record once
+  #44 can carry owners across the change. Its *label* and *emoji* are already
+  settings (`trip label` / `trip icon`), so a reader that outlives this trip
+  can at least count down to something else without a rebuild.
 
 ## The theme system
 
 - **#37 Let a theme own the card sounds** — unblocked now that bands store an id
   rather than a path. `sounds_init` scans the active set as well as core and
   masks by id. This is what makes a Halloween `chime` a creaking door.
-- **#40 Per-theme `set.json`** — optional, overrides only. The label mostly
-  solves itself (a card is assigned to a *slot*, and the slot is `chime` in
-  every season); the **animation** does not — a theme's chime would fall through
-  to `ANIM_CELEBRATE`, bright and cheerful and exactly wrong for a door.
+- **#40 Per-theme `set.json`** — optional, overrides only, living at the **root
+  of the theme** so one directory is the whole season. The label mostly solves
+  itself (a card is assigned to a *slot*, and the slot is `chime` in every
+  season); the **animation** does not — a theme's chime would fall through to
+  `ANIM_CELEBRATE`, bright and cheerful and exactly wrong for a door.
+- **#43 Disney becomes a theme set like any other** — today it's the bare root
+  and everything else is a special case, which means the *default* is the one
+  path that never gets exercised by the theme code. Make it `sets/disney/` and
+  the seasons stop being exceptions. Root stays as the fallback so an
+  Adafruit-sounds build with no themes at all still works.
 
 ## Managing it from afar
 
@@ -59,7 +138,22 @@ Everything else on this page rides OTA. These don't.
 - **#30 Ring as a progress meter** — do it *with* #29, not after. A ring that
   means "this is how much is left" makes a long animation read as intentional
   rather than slow, which is a better fix than shortening.
-- **#9 "Working" beat** — animation first, audio a moment later.
+- **#41 Palettes: the same animations, re-coloured** — most of the existing
+  shows are the right *motion* for Halloween and wrong only in hue. Lift the
+  hard-coded colours out of `leds.c` into a palette a theme can name, so
+  `ANIM_CELEBRATE` in October is the identical choreography in orange and
+  purple. Cheapest large win in the theme system: no new animation code, and
+  a season gets a look from a few lines of `set.json`.
+- **#42 Custom scenes, and a way to describe the face** — the blocker under
+  #41's ceiling. Some looks aren't a re-colour of anything: Halloween's Mickey
+  with an orange face and *green ears*, Christmas's green ring with red
+  "berries" scattered round it and a sparkling face. Static is fine to start —
+  the hard part isn't animating it, it's that the firmware has no vocabulary
+  for *regions* of the strip beyond "ring" and "face". Needs a layout
+  description (ears as their own segments, ring positions addressable) before
+  any of it can be authored as data. **No settled design yet — think before
+  building.** Note it also touches `leds_set_layout`, which is per-device.
+- **#9 "Working" beat** — animation first, audio a moment later. In the real device, this looks like a white trailing dot racing around the ring until the device replies. Would be worthwhile to create this chasing animation code with a variable color.
 
 ## Countdown behaviour
 

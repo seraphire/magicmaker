@@ -87,3 +87,9 @@ esp_err_t assets_sync_pack(const char *url, const char *cur_fw,
 
 // The pack version currently applied, or "" if none. Written into `out`.
 void assets_pack_version(char *out, size_t sz);
+
+// The firmware version the last sync said it needed, when that sync came back
+// DEFERRED. "" once a sync gets through. Recorded because the caller wants to
+// tell somebody which version is wanted, and re-fetching the manifest just to
+// re-read one string it already parsed would be silly.
+const char *assets_pack_requires(void);

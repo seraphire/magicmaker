@@ -24,6 +24,8 @@
 #include "app.h"          // app_moment_busy - don't start TLS mid-show
 #include <dirent.h>
 #include "countdown.h"
+#include "occasions.h"
+#include "needhelp.h"
 #include "leds.h"
 #include "verscmp.h"
 #if WIFI_ENABLE
@@ -116,7 +118,9 @@ static int cmd_ota_url(int argc, char **argv)
 #endif
     printf("Downloading + installing %s ...\n", argv[1]);
     audio_play(PROMPT_UPDATE_START);                 // user-initiated -> announce
-    if (ota_install_from_url(argv[1]) != ESP_OK) {
+    // No manifest here, so no hash to check - `ota-url` is the deliberate
+    // "install exactly this" escape hatch.
+    if (ota_install_from_url(argv[1], NULL, NULL) != ESP_OK) {
         audio_play(PROMPT_UPDATE_FAILED);
         printf("failed (see log).\n");
         return 1;
@@ -201,6 +205,172 @@ static int cmd_audio_set(int argc, char **argv)
     countdown_set_audio_set(cfg.audio_set);
     printf("Audio set is now %s\n", cfg.audio_set);
     return 0;
+}
+
+// Join argv[from..argc-1] back into one space-separated string.
+//
+// The console splits on spaces, so a label typed as "Joe's birthday" arrives as
+// two arguments and everything after the first word is lost. Any argument that
+// is free text has to be the LAST one and has to be rejoined - which is why the
+// emoji sits before the label in `occasion set` rather than after it, even
+// though it reads a little oddly.
+static void join_args(char *out, size_t sz, int argc, char **argv, int from)
+{
+    out[0] = '\0';
+    size_t n = 0;
+    for (int i = from; i < argc && n < sz - 1; i++) {
+        if (i > from && n < sz - 1) out[n++] = ' ';
+        n += (size_t)snprintf(out + n, sz - n, "%s", argv[i]);
+        if (n >= sz - 1) { n = sz - 1; break; }
+    }
+    out[n] = '\0';
+}
+
+// List, add or remove the extra countdowns.
+//
+// Slot 0 is the trip and is not editable here on purpose - it lives in appcfg,
+// where the web page and `audio-set` already edit it. One writer, one source of
+// truth, and no way for the two to disagree about the date.
+static int cmd_occasion(int argc, char **argv)
+{
+    if (argc < 2 || strcmp(argv[1], "list") == 0) {
+        printf("slot  id           label                  when         lead  state\n");
+        for (int i = 0; i < OCC_MAX; i++) {
+            occasion_t o;
+            if (!occ_get(i, &o)) continue;
+            char when[16];
+            if (o.flags & OCC_F_ANNUAL) snprintf(when, sizeof(when), "%02u-%02u yearly", o.month, o.day);
+            else                        snprintf(when, sizeof(when), "%04u-%02u-%02u", o.year, o.month, o.day);
+            int days = occ_days_remaining(i);
+            // The icon is printed unpadded and last on its own column run: an
+            // emoji is several bytes but usually two columns wide, so printf's
+            // width counts bytes and would misalign every row after it.
+            printf("  %d   %-12s %-22s %-12s %4u  %s  %s%s%s\n", i, o.id, o.label, when, o.lead_days,
+                   o.icon[0] ? o.icon : " ",
+                   (o.flags & OCC_F_ENABLED) ? "on" : "off",
+                   (o.flags & OCC_F_MANAGED) ? ", managed" : "",
+                   occ_in_window(i) ? ", in window" : "");
+            if (days != INT_MIN) printf("       %d day(s) away\n", days);
+        }
+        int a = occ_active();
+        printf("Active: %s\n", a < 0 ? "(nothing in window)" : "");
+        if (a >= 0) { occasion_t o; if (occ_get(a, &o)) printf("  slot %d, %s (%s)\n", a, o.label, o.id); }
+        printf("Usage: occasion set <slot 1-%d> <id> <MM-DD|YYYY-MM-DD> <lead> [emoji|-] [label...]\n",
+               OCC_MAX - 1);
+        printf("       occasion clear <slot>\n");
+        printf("An MM-DD date recurs every year; lead 0 means it speaks all year.\n");
+        printf("Slot 0's name and emoji are device settings, not a record: see 'trip'.\n");
+        printf("This console strips emoji, so give them as codepoints: U+1F383 (or\n");
+        printf("U+1F468+200D+1F373 for a joined sequence). The web UI takes them literally.\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "clear") == 0 && argc >= 3) {
+        int slot = atoi(argv[2]);
+        if (!occ_clear(slot)) { printf("Cannot clear slot %d.\n", slot); return 1; }
+        printf("Slot %d cleared.\n", slot);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "set") == 0 && argc >= 6) {
+        occasion_t o;
+        memset(&o, 0, sizeof(o));
+        int slot = atoi(argv[2]);
+        snprintf(o.id, sizeof(o.id), "%s", argv[3]);
+
+        unsigned y = 0, m = 0, d = 0;
+        if (sscanf(argv[4], "%u-%u-%u", &y, &m, &d) == 3) {
+            o.year = (uint16_t)y; o.month = (uint8_t)m; o.day = (uint8_t)d;
+        } else if (sscanf(argv[4], "%u-%u", &m, &d) == 2) {
+            o.month = (uint8_t)m; o.day = (uint8_t)d;
+            o.flags |= OCC_F_ANNUAL;
+        } else {
+            printf("Date must be MM-DD (yearly) or YYYY-MM-DD (once).\n");
+            return 1;
+        }
+
+        o.lead_days = (uint16_t)atoi(argv[5]);
+        o.flags |= OCC_F_ENABLED;
+
+        // Emoji before label: the label is free text and so has to be last.
+        // "-" means no emoji, because an argument that can be empty needs a
+        // word for empty.
+        if (argc >= 7 && strcmp(argv[6], "-") != 0)
+            occ_icon_parse(o.icon, sizeof(o.icon), argv[6]);
+        if (argc >= 8) join_args(o.label, sizeof(o.label), argc, argv, 7);
+        else           snprintf(o.label, sizeof(o.label), "%s", o.id);
+
+        // Refuse a set that isn't on the device, for the same reason audio-set
+        // does: the shared numbers would still resolve, so it would half-work.
+        char probe[80];
+        snprintf(probe, sizeof(probe), "/spiffs/cd/sets/%.32s", o.id);
+        DIR *chk = opendir(probe);
+        if (!chk) { printf("No such audio set on this device: %s\n", o.id); return 1; }
+        closedir(chk);
+
+        if (!occ_set(slot, &o)) { printf("Save failed (slot must be 1-%d).\n", OCC_MAX - 1); return 1; }
+        printf("Slot %d is now %s %s (%s), %u day lead.\n", slot, o.icon, o.label, o.id, o.lead_days);
+        return 0;
+    }
+
+    printf("Usage: occasion [list] | set <slot> <id> <date> <lead> [label] | clear <slot>\n");
+    return 1;
+}
+
+// What slot 0 is called and what it looks like. Its own command rather than a
+// slot argument because the trip isn't a stored occasion - it's synthesised
+// from appcfg, so this has to be written where appcfg lives.
+static int cmd_trip(int argc, char **argv)
+{
+    device_config_t cfg;
+    appcfg_load(&cfg);
+
+    if (argc < 3) {
+        printf("Trip: %s %s\n", cfg.trip_icon, cfg.trip_label);
+        printf("Set with: trip label <text>   |   trip icon <emoji>\n");
+        printf("('none' clears the icon.)\n");
+        return 0;
+    }
+
+    if (strcmp(argv[1], "label") == 0) {
+        join_args(cfg.trip_label, sizeof(cfg.trip_label), argc, argv, 2);
+    } else if (strcmp(argv[1], "icon") == 0) {
+        if (strcmp(argv[2], "none") == 0) cfg.trip_icon[0] = '\0';
+        else occ_icon_parse(cfg.trip_icon, sizeof(cfg.trip_icon), argv[2]);
+    } else {
+        printf("Usage: trip label <text> | trip icon <emoji>\n");
+        return 1;
+    }
+
+    if (appcfg_save(&cfg) != ESP_OK) { printf("Save failed.\n"); return 1; }
+    printf("Trip is now %s %s\n", cfg.trip_icon, cfg.trip_label);
+    return 0;
+}
+
+// Force the "I need a hand" state on or off.
+//
+// Exists because the real trigger - a published pack whose firmware floor is
+// above what's running - is not something you want to arrange on purpose just
+// to hear the clip. Reaching that state for real means publishing a broken
+// pack to a live URL, which is exactly the mistake this feature exists to
+// announce; testing it that way would be using production as the test rig.
+static int cmd_needhelp(int argc, char **argv)
+{
+    if (argc < 2) {
+        printf("Needs help: %s\n", needhelp_active() ? "yes" : "no");
+        if (needhelp_active()) printf("  %s\n", needhelp_text());
+        printf("Usage: needhelp on [version] | off\n");
+        return 0;
+    }
+    if (strcmp(argv[1], "off") == 0) { needhelp_clear(); printf("Cleared.\n"); return 0; }
+    if (strcmp(argv[1], "on") == 0) {
+        needhelp_set(HELP_PACK_FW, (argc >= 3) ? argv[2] : "9.9.9");
+        printf("Set: %s\n", needhelp_text());
+        printf("The next scan will speak it. The next successful pack sync clears it.\n");
+        return 0;
+    }
+    printf("Usage: needhelp on [version] | off\n");
+    return 1;
 }
 
 // Show or set the audio pack URL.
@@ -408,7 +578,13 @@ static int cmd_countdown(int argc, char **argv)
         printf("countdown: clock not set yet (needs NTP) - can't compute.\n");
         return 0;
     }
-    printf("days until trip : %d\n", d);
+    // Name the occasion rather than saying "trip" regardless. With several
+    // countdowns loaded, a bare number is ambiguous exactly when it matters -
+    // the whole question being "which one is it counting right now?"
+    int a = occ_active();
+    occasion_t o;
+    if (a >= 0 && occ_get(a, &o)) printf("counting to     : %s (%s)\n", o.label, o.id);
+    printf("days remaining  : %d\n", d);
     printf("tier            : %s\n", countdown_tier_name(d));
     printf("(use 'countdown <days>' to hear any tier now)\n");
     return 0;
@@ -659,6 +835,24 @@ void cli_start(void)
         .hint    = "[<name>]",
         .func    = &cmd_audio_set,
     };
+    const esp_console_cmd_t occasion_cmd = {
+        .command = "occasion",
+        .help    = "List the countdowns, or add/remove one (slot 0 is the trip)",
+        .hint    = "[list | set <slot> <id> <date> <lead> [label] | clear <slot>]",
+        .func    = &cmd_occasion,
+    };
+    const esp_console_cmd_t trip_cmd = {
+        .command = "trip",
+        .help    = "Show or set what slot 0 is called and its emoji",
+        .hint    = "[label <text> | icon <emoji>]",
+        .func    = &cmd_trip,
+    };
+    const esp_console_cmd_t needhelp_cmd = {
+        .command = "needhelp",
+        .help    = "Force the 'I need a hand' state, to hear it without breaking a pack",
+        .hint    = "[on [version] | off]",
+        .func    = &cmd_needhelp,
+    };
     const esp_console_cmd_t assetsurl_cmd = {
         .command = "assets-url",
         .help    = "Show or set the audio pack URL ('assets-url none' clears it)",
@@ -700,6 +894,9 @@ void cli_start(void)
     ESP_ERROR_CHECK(esp_console_cmd_register(&syncmedia_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&assetsurl_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&audioset_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&occasion_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&trip_cmd));
+    ESP_ERROR_CHECK(esp_console_cmd_register(&needhelp_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&countdown_cmd));
     ESP_ERROR_CHECK(esp_console_cmd_register(&selftest_cmd));
 #if WIFI_ENABLE

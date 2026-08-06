@@ -28,6 +28,7 @@
 #include "bands.h"
 #include "ota.h"
 #include "assets.h"      // pack sync runs even when firmware updates are dormant
+#include "needhelp.h"
 #include "countdown.h"
 #if WIFI_ENABLE
 #include "appcfg.h"
@@ -442,10 +443,15 @@ static void check_for_updates(const char *why, bool verify)
     // sync a thing - the exact configuration a gift ships in, since dormant
     // firmware updates are the point of that default.
     if (cfg.assets_url[0]) {
-        int n = 0;
+        int  n = 0;
+        bool deferred = false;
         ESP_LOGI(TAG, "%s pack check: %s", why, cfg.assets_url);
-        if (assets_sync_pack(cfg.assets_url, FW_VERSION, &n, NULL, verify) != ESP_OK)
+        // assets_sync_pack raises and clears the "needs a person" state itself,
+        // so every caller of it agrees - see the note at the top of assets.c.
+        if (assets_sync_pack(cfg.assets_url, FW_VERSION, &n, &deferred, verify) != ESP_OK)
             ESP_LOGW(TAG, "pack sync incomplete - will retry next cycle");
+        else if (deferred)
+            ESP_LOGW(TAG, "pack held back: needs firmware %s", assets_pack_requires());
         else if (n > 0)
             ESP_LOGI(TAG, "pack: %d file(s) updated", n);
     }
@@ -826,6 +832,23 @@ void app_main(void)
             // still be due next time.
             if (cdn > 0 && !s_pending && !moment_interrupted())
                 celebrate_seq(cdpaths, cdn, (anim_id_t)cdanim);
+
+            // ...and last, if the device can't finish an update on its own, it
+            // asks. Last so it never displaces what someone tapped for: the
+            // scan still does its own thing first, and this is appended.
+            //
+            // Every scan, deliberately - it is the only channel the device has
+            // to reach somebody, and a condition that needs a person doesn't
+            // resolve by being mentioned once. It stops the moment the next
+            // sync succeeds, so the way to make it quiet is to fix it.
+            if (needhelp_active() && !s_pending && !moment_interrupted()) {
+                char clip[CD_PATH_MAX];
+                if (needhelp_clip(clip, sizeof(clip))) {
+                    static char seq[1][CD_PATH_MAX];
+                    snprintf(seq[0], CD_PATH_MAX, "%s", clip);
+                    celebrate_seq(seq, 1, ANIM_PULSE);   // a voice, not a show
+                }
+            }
 
             s_current_len = 0;                          // moment over
             // The re-trigger cooldown is measured from the last read, so a

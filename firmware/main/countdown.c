@@ -8,6 +8,7 @@
 #include "nvs.h"
 #include "ntp.h"
 #include "appcfg.h"
+#include "occasions.h"
 #include "leds.h"
 #include "audio.h"
 
@@ -182,34 +183,27 @@ static bool chance(int percent)
 }
 
 // --- date math --------------------------------------------------------------
-// Days since 1970-01-01 for a civil date (Hinnant). No mktime/DST pitfalls -
-// just a serial day number, so subtracting two dates counts calendar days.
-static long days_from_civil(int y, unsigned m, unsigned d)
-{
-    y -= m <= 2;
-    long era = (y >= 0 ? y : y - 399) / 400;
-    unsigned yoe = (unsigned)(y - era * 400);
-    unsigned doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    return era * 146097 + (long)doe - 719468;
-}
-
-static bool date_math(const device_config_t *cfg, long *today, int *days)
+// The calendar arithmetic lives in occasions.c now, because the window check
+// and the spoken phrase have to agree about what a day is.
+static bool date_math(int occ, long *today, int *days)
 {
     struct tm now;
     if (!ntp_localtime(&now)) return false;
-    *today = days_from_civil(now.tm_year + 1900, now.tm_mon + 1, now.tm_mday);
-    *days  = (int)(days_from_civil(cfg->trip_year, cfg->trip_month, cfg->trip_day) - *today);
+    int d = occ_days_remaining(occ);
+    if (d == INT_MIN) return false;
+    *today = occ_days_from_civil(now.tm_year + 1900, now.tm_mon + 1, now.tm_mday);
+    *days  = d;
     return true;
 }
 
 int countdown_days_remaining(void)
 {
-    device_config_t cfg;
-    appcfg_load(&cfg);
-    long today; int days;
-    if (!date_math(&cfg, &today, &days)) return INT_MIN;
-    return days;
+    // Fall back to the trip when nothing is in its window, so this keeps
+    // answering the question it always answered - the CLI and the web page ask
+    // it to display a number, not to decide whether to speak.
+    int occ = occ_active();
+    if (occ < 0) occ = OCC_TRIP;
+    return occ_days_remaining(occ);
 }
 
 const char *countdown_tier_name(int days)
@@ -398,14 +392,48 @@ static bool is_speaking_day(int days)
 // dangerous than an enrolment - the worst case is a band forgetting it was
 // greeted today, or reverting to the default speaking mode - but "less
 // dangerous" is not a reason to lose a setting somebody chose.
-typedef struct { int32_t day; int16_t idx; uint8_t mode; } cd_rec_t;
+// `day` stayed exactly where it was and still means occasion 0, the trip. The
+// per-occasion marks were APPENDED after it rather than folded into an array
+// starting at zero, because every record already in the field is the original
+// eight bytes and rec_load copies only as far as the overlap - so an existing
+// band keeps its trip mark, and gains seven zeroed ones meaning "not yet
+// spoken", which is true.
+//
+// Separate marks per occasion, not one shared mark, is the whole point: a tap
+// that spent today's greeting on Christmas must not also silence the trip. It's
+// what lets repeat taps DRAIN the queue instead of the occasions competing for
+// one slot. (#36 builds on this.)
+typedef struct {
+    int32_t day;                    // occasion 0 (the trip)
+    int16_t idx;
+    uint8_t mode;
+    uint8_t _pad;                   // was implicit padding; named so the offsets
+                                    // below are the compiler's business, not luck
+    int32_t day_n[OCC_MAX - 1];     // occasions 1..OCC_MAX-1
+} cd_rec_t;
+
+static int32_t rec_day(const cd_rec_t *r, int occ)
+{
+    if (occ <= 0 || occ >= OCC_MAX) return r->day;
+    return r->day_n[occ - 1];
+}
+
+static void rec_set_day(cd_rec_t *r, int occ, int32_t v)
+{
+    if (occ <= 0 || occ >= OCC_MAX) r->day = v;
+    else                            r->day_n[occ - 1] = v;
+}
 
 // Length-tolerant read, matching store.c's entry_load(). Returns false if there
 // is no record at all; a record of an unexpected SIZE is read as far as the
 // overlap goes rather than discarded, so growing this struct later - or an OTA
 // rollback after a build that already grew it - doesn't reset what the owner
 // picked.
-#define CD_READ_MAX 64
+// Generously larger than sizeof(cd_rec_t), which now grows with OCC_MAX. Sized
+// to today's struct, this becomes a trap that springs the next time a field is
+// appended - the read silently truncates and the new field always reads back
+// zero, a symptom that looks nothing like its cause.
+#define CD_READ_MAX 256
 
 static bool rec_load(nvs_handle_t h, const char *uid_hex, cd_rec_t *out)
 {
@@ -465,8 +493,12 @@ void countdown_reset_all(void)
         nvs_handle_t h;
         if (nvs_open(NS, NVS_READWRITE, &h) == ESP_OK) {
             cd_rec_t rec;
-            if (rec_load(h, info.key, &rec) && rec.day != 0) {
+            if (rec_load(h, info.key, &rec)) {
+                // Every occasion's mark, not just the trip's. Clearing one and
+                // leaving the rest would mean changing the date re-armed the
+                // countdown for some bands and silently not for others.
                 rec.day = 0;                    // keep idx + mode
+                memset(rec.day_n, 0, sizeof(rec.day_n));
                 nvs_set_blob(h, info.key, &rec, sizeof(rec));
                 nvs_commit(h);
                 cleared++;
@@ -526,12 +558,24 @@ int countdown_due(const uint8_t *uid, uint8_t uid_len,
         }
     }
 
+    // Which occasion speaks is DERIVED from the calendar, every tap. Nothing
+    // stores "it's Christmas now", so nothing can be wrong about it in March.
+    int occ = occ_active();
+    if (occ < 0) return 0;                         // nothing planned, or nothing
+                                                   // inside its window today
+
+    // The occasion names its own audio set, which is what makes it sound like
+    // itself. For the trip that set IS cfg.audio_set, so the CLI override keeps
+    // working unchanged; for a seasonal one the occasion wins, because a
+    // Christmas countdown speaking in the trip's voice is the bug this replaces.
+    occasion_t o;
+    if (occ_get(occ, &o)) countdown_set_audio_set(o.id);
+
     device_config_t cfg;
     appcfg_load(&cfg);
-    if (!cfg.countdown_enabled) return 0;          // "No trip planned"
 
     long today; int days;
-    if (!date_math(&cfg, &today, &days)) return 0; // clock not set -> skip
+    if (!date_math(occ, &today, &days)) return 0;  // clock not set -> skip
 
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return 0;
@@ -546,10 +590,14 @@ int countdown_due(const uint8_t *uid, uint8_t uid_len,
     // taper speaks just occasionally, so the button let the tap past one gate
     // and the next one stopped it, and from the page it looked like the button
     // did nothing.
+    // "Again today" is deliberately checked on the TRIP's mark whichever
+    // occasion is speaking: the button means "say something on the next tap",
+    // and making the owner guess which occasion the device considers current
+    // would defeat the point of the occasion being derived in the first place.
     bool forced = (rec.day == CD_FORCE);
 
     if (!forced) {
-        if (mode == CD_OFF || (mode == CD_DAILY && rec.day == (int32_t)today)) {
+        if (mode == CD_OFF || (mode == CD_DAILY && rec_day(&rec, occ) == (int32_t)today)) {
             ESP_LOGD(TAG, "band %s: %s", key,
                      mode == CD_OFF ? "countdown off" : "already greeted today");
             nvs_close(h);
@@ -574,7 +622,9 @@ int countdown_due(const uint8_t *uid, uint8_t uid_len,
     int n = countdown_build(days, paths, max, anim_out);
     if (n <= 0) { nvs_close(h); return 0; }         // bank missing pieces
 
-    rec.day = (int32_t)today;
+    if (forced) rec.day = 0;     // consume the force, or every tap from here on
+                                 // is forced and the daily gate never returns
+    rec_set_day(&rec, occ, (int32_t)today);
     rec.idx = seen_store();      // rides along on a write that was happening anyway
     nvs_set_blob(h, key, &rec, sizeof(rec));
     nvs_commit(h);

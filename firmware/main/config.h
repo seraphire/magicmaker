@@ -240,7 +240,7 @@
 #define OTA_TEST_URL         "https://example.com/"
 
 // Running firmware version (bump per release; compared against the manifest).
-#define FW_VERSION           "1.3.0"
+#define FW_VERSION           "1.4.0"
 // Where the update manifest lives (override per-fetch with: update-check <url>).
 #define OTA_MANIFEST_URL     "https://example.com/manifest.json"
 

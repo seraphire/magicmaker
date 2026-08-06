@@ -21,6 +21,10 @@ typedef struct {
     char firmware_url[256];  // where the .bin lives
     char manifest_url[160];  // optional top-level "manifest_url": relocate future
                              // checks here (host migration). Empty if absent.
+    char sha256[65];         // expected hash of the image
+    char sig[160];           // base64 ECDSA-P256 signature over that hash. An
+                             // OTA install is REFUSED without it - a check you
+                             // can skip by omitting a field is not a check.
 } ota_manifest_t;
 
 // Parse a manifest JSON string into *out ("version" + "firmware_url").
@@ -70,7 +74,14 @@ size_t ota_bytes_written(void);
 // Download a firmware image from `url` and install it to the inactive slot
 // (streamed + validated via esp_https_ota; follows redirects; http:// allowed
 // for LAN testing). On ESP_OK the caller reboots to run it.
-esp_err_t ota_install_from_url(const char *url);
+// `expect_sha256` (optional, may be NULL or "") is checked against the image
+// actually written before the boot partition is switched. The manifest has
+// carried this hash all along and NOTHING looked at it - a truncated download or
+// a swapped binary would install and reboot into whatever arrived. Verifying it
+// is not authenticity (anyone who can change the file can change the manifest)
+// but it does close the accident case, which is the likelier one.
+esp_err_t ota_install_from_url(const char *url, const char *expect_sha256,
+                               const char *expect_sig);
 
 // Full auto-update: fetch the manifest, and only if its version is newer than
 // `cur_version`, download + install its firmware_url. Sets *installed on apply.

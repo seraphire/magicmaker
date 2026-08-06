@@ -21,6 +21,8 @@
 #include "bands.h"
 #include "sounds.h"
 #include "countdown.h"
+#include "occasions.h"
+#include "needhelp.h"
 #include "leds.h"
 #include "webota.h"
 #include "wifi.h"
@@ -620,6 +622,277 @@ static void band_to_json(const char *uid_hex, const char *sound_id, uint8_t anim
     cJSON_AddItemToArray(arr, o);
 }
 
+// --- settings export / import ----------------------------------------------
+// One file holding everything the owner chose, so a change that has to break
+// stored data can ship without un-enrolling anybody: export, update, import.
+//
+// An ENDPOINT rather than something scraped out of the rendered page. The page
+// shows only what it happens to draw - it has never listed the LED layout or
+// the idle colour - and it changes shape every time the HTML does. Restoring is
+// the half that matters, and you cannot restore from a screenshot.
+//
+// WI-FI IS NOT IN HERE AT ALL - not the password, and not the SSID either.
+//
+// The password is obvious: this is a file people mail to themselves, and a
+// plaintext credential in it outlives every good intention about where it gets
+// stored. The SSID is the less obvious half. It could not be imported anyway -
+// applying a network name without its password takes a working device offline,
+// the one state where the web page can't be reached to undo it - so carrying it
+// bought nothing and put the name of somebody's home network in a file that
+// travels. A field that can only be read and never applied is not a backup of
+// anything; it is just a leak with a schema.
+//
+// Re-provisioning is the button-hold setup portal, which is where it belongs.
+#define EXPORT_SCHEMA 1
+
+static esp_err_t api_export_get(httpd_req_t *req)
+{
+    device_config_t cfg;
+    appcfg_load(&cfg);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "schema", EXPORT_SCHEMA);
+    cJSON_AddStringToObject(root, "firmware", FW_VERSION);
+    cJSON_AddStringToObject(root, "device_name", cfg.device_name);
+
+    cJSON *c = cJSON_AddObjectToObject(root, "config");
+    cJSON_AddNumberToObject(c, "trip_year",  cfg.trip_year);
+    cJSON_AddNumberToObject(c, "trip_month", cfg.trip_month);
+    cJSON_AddNumberToObject(c, "trip_day",   cfg.trip_day);
+    cJSON_AddStringToObject(c, "trip_label", cfg.trip_label);
+    cJSON_AddStringToObject(c, "trip_icon",  cfg.trip_icon);
+    cJSON_AddBoolToObject  (c, "countdown_enabled", cfg.countdown_enabled);
+    cJSON_AddBoolToObject  (c, "countdown_taper",   cfg.countdown_taper);
+    cJSON_AddBoolToObject  (c, "idle_led_enabled",  cfg.idle_led_enabled);
+    cJSON_AddBoolToObject  (c, "boot_audio_enabled",cfg.boot_audio_enabled);
+    cJSON_AddNumberToObject(c, "idle_color",  cfg.idle_color);
+    cJSON_AddNumberToObject(c, "ring_leds",   cfg.ring_leds);
+    cJSON_AddNumberToObject(c, "mickey_leds", cfg.mickey_leds);
+    cJSON_AddBoolToObject  (c, "ring_first",  cfg.ring_first);
+    cJSON_AddStringToObject(c, "audio_set",   cfg.audio_set);
+    cJSON_AddStringToObject(c, "manifest_url",cfg.manifest_url);
+    cJSON_AddStringToObject(c, "assets_url",  cfg.assets_url);
+
+    // Slot 0 is the trip and lives in config above, so it is not repeated here.
+    cJSON *occ = cJSON_AddArrayToObject(root, "occasions");
+    for (int i = 1; i < OCC_MAX; i++) {
+        occasion_t o;
+        if (!occ_get(i, &o)) continue;
+        cJSON *j = cJSON_CreateObject();
+        cJSON_AddNumberToObject(j, "slot",  i);
+        cJSON_AddStringToObject(j, "id",    o.id);
+        cJSON_AddStringToObject(j, "label", o.label);
+        cJSON_AddStringToObject(j, "icon",  o.icon);
+        cJSON_AddNumberToObject(j, "year",  o.year);
+        cJSON_AddNumberToObject(j, "month", o.month);
+        cJSON_AddNumberToObject(j, "day",   o.day);
+        cJSON_AddNumberToObject(j, "lead_days", o.lead_days);
+        cJSON_AddNumberToObject(j, "flags", o.flags);
+        cJSON_AddItemToArray(occ, j);
+    }
+
+    cJSON *bands = cJSON_AddArrayToObject(root, "bands");
+    store_list(band_to_json, bands);      // same shape /api/bands already serves
+
+    httpd_resp_set_hdr(req, "Content-Disposition",
+                       "attachment; filename=\"magicmaker-settings.json\"");
+    return send_json(req, root);
+}
+
+// Small readers that leave the current value alone when a key is absent, so a
+// file written by an older firmware imports what it knows and nothing else.
+// A partial file is a normal thing to receive, not an error.
+static void j_str(cJSON *o, const char *k, char *dst, size_t sz)
+{
+    cJSON *v = cJSON_GetObjectItem(o, k);
+    if (cJSON_IsString(v) && v->valuestring) snprintf(dst, sz, "%s", v->valuestring);
+}
+static void j_int(cJSON *o, const char *k, int *dst)
+{
+    cJSON *v = cJSON_GetObjectItem(o, k);
+    if (cJSON_IsNumber(v)) *dst = v->valueint;
+}
+static void j_bool(cJSON *o, const char *k, bool *dst)
+{
+    cJSON *v = cJSON_GetObjectItem(o, k);
+    if (cJSON_IsBool(v)) *dst = cJSON_IsTrue(v);
+}
+
+// POST /api/import - restore a file produced by /api/export.
+//
+// Everything in the file is INPUT, not a promise: it has been round-tripped
+// through a text editor and an email client by the time it comes back. Values
+// are clamped, ids are checked against what the device actually has, and
+// anything unrecognised is skipped rather than stored.
+static esp_err_t api_import_post(httpd_req_t *req)
+{
+    int len = req->content_len;
+    if (len <= 0 || len > 32768) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
+        return ESP_OK;
+    }
+
+    // Heap, not stack: a hundred bands is comfortably past any sane stack
+    // frame, and the httpd task's stack is not ours to blow.
+    char *buf = malloc((size_t)len + 1);
+    if (!buf) { httpd_resp_send_500(req); return ESP_FAIL; }
+    if (read_body(req, buf, (size_t)len + 1) < 0) { free(buf); return ESP_FAIL; }
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "not valid JSON");
+        return ESP_OK;
+    }
+
+    cJSON *schema = cJSON_GetObjectItem(root, "schema");
+    if (!cJSON_IsNumber(schema) || schema->valueint > EXPORT_SCHEMA) {
+        cJSON_Delete(root);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "this file is from a newer firmware than this device");
+        return ESP_OK;
+    }
+
+    int n_occ = 0, n_band = 0;
+
+    // --- config -------------------------------------------------------------
+    cJSON *c = cJSON_GetObjectItem(root, "config");
+    if (cJSON_IsObject(c)) {
+        device_config_t cfg;
+        appcfg_load(&cfg);                       // start from what's here, so a
+                                                 // partial file edits rather
+                                                 // than replaces
+        j_int (c, "trip_year",  &cfg.trip_year);
+        j_int (c, "trip_month", &cfg.trip_month);
+        j_int (c, "trip_day",   &cfg.trip_day);
+        j_str (c, "trip_label", cfg.trip_label, sizeof(cfg.trip_label));
+        j_str (c, "trip_icon",  cfg.trip_icon,  sizeof(cfg.trip_icon));
+        j_bool(c, "countdown_enabled",  &cfg.countdown_enabled);
+        j_bool(c, "countdown_taper",    &cfg.countdown_taper);
+        j_bool(c, "idle_led_enabled",   &cfg.idle_led_enabled);
+        j_bool(c, "boot_audio_enabled", &cfg.boot_audio_enabled);
+        j_int (c, "ring_leds",   &cfg.ring_leds);
+        j_int (c, "mickey_leds", &cfg.mickey_leds);
+        j_bool(c, "ring_first",  &cfg.ring_first);
+        j_str (c, "audio_set",   cfg.audio_set,    sizeof(cfg.audio_set));
+        j_str (c, "manifest_url",cfg.manifest_url, sizeof(cfg.manifest_url));
+        j_str (c, "assets_url",  cfg.assets_url,   sizeof(cfg.assets_url));
+
+        cJSON *ic = cJSON_GetObjectItem(c, "idle_color");
+        if (cJSON_IsNumber(ic)) cfg.idle_color = (uint32_t)ic->valuedouble & 0x00FFFFFF;
+
+        // Clamp what a bad value would break. A month of 0 or an LED count of
+        // 9000 doesn't fail loudly - it produces a device that behaves oddly
+        // and gives no hint why.
+        if (cfg.trip_month < 1 || cfg.trip_month > 12) cfg.trip_month = 1;
+        if (cfg.trip_day   < 1 || cfg.trip_day   > 31) cfg.trip_day   = 1;
+        if (cfg.trip_year  < 2000 || cfg.trip_year > 2200) cfg.trip_year = 2027;
+        if (cfg.ring_leds   < 0) cfg.ring_leds   = 0;
+        if (cfg.mickey_leds < 0) cfg.mickey_leds = 0;
+
+        j_str(root, "device_name", cfg.device_name, sizeof(cfg.device_name));
+        bands_sanitize_name(cfg.device_name);
+
+        // appcfg_load above filled cfg.wifi_ssid/password from NVS and nothing
+        // here overwrote them, so saving the whole struct preserves them. The
+        // import path reads no Wi-Fi keys at all - a file that carried them
+        // would be ignored, not honoured.
+        appcfg_save(&cfg);
+    }
+
+    // --- occasions ----------------------------------------------------------
+    // Replace, don't merge: the file is a snapshot of what the owner had, and
+    // merging would silently resurrect an occasion they deleted before
+    // exporting. Slot 0 isn't a record, so it isn't cleared here.
+    cJSON *occ = cJSON_GetObjectItem(root, "occasions");
+    if (cJSON_IsArray(occ)) {
+        for (int i = 1; i < OCC_MAX; i++) occ_clear(i);
+
+        cJSON *j = NULL;
+        cJSON_ArrayForEach(j, occ) {
+            if (!cJSON_IsObject(j)) continue;
+            occasion_t o;
+            memset(&o, 0, sizeof(o));
+
+            int slot = 0, year = 0, month = 0, day = 0, lead = 0, flags = 0;
+            j_int(j, "slot", &slot);
+            j_int(j, "year", &year);
+            j_int(j, "month", &month);
+            j_int(j, "day", &day);
+            j_int(j, "lead_days", &lead);
+            j_int(j, "flags", &flags);
+            j_str(j, "id",    o.id,    sizeof(o.id));
+            j_str(j, "label", o.label, sizeof(o.label));
+            j_str(j, "icon",  o.icon,  sizeof(o.icon));
+
+            if (slot < 1 || slot >= OCC_MAX) continue;
+            if (month < 1 || month > 12 || day < 1 || day > 31) continue;
+            if (lead < 0 || lead > 3650) lead = 0;
+
+            o.year      = (uint16_t)year;
+            o.month     = (uint8_t)month;
+            o.day       = (uint8_t)day;
+            o.lead_days = (uint16_t)lead;
+            o.flags     = (uint8_t)flags;
+            bands_sanitize_name(o.label);
+
+            if (occ_set(slot, &o)) n_occ++;
+        }
+    }
+
+    // --- bands --------------------------------------------------------------
+    // Merged, not replaced: an enrollment is tied to a physical card, and
+    // wiping the ones absent from the file would punish someone for importing
+    // an older backup after adding a card.
+    cJSON *bands = cJSON_GetObjectItem(root, "bands");
+    if (cJSON_IsArray(bands)) {
+        cJSON *j = NULL;
+        cJSON_ArrayForEach(j, bands) {
+            if (!cJSON_IsObject(j)) continue;
+
+            char uidhex[24] = "", name[80] = "", sid[24] = "";
+            int anim = 0, cdmode = 0;
+            j_str(j, "uid",   uidhex, sizeof(uidhex));
+            j_str(j, "name",  name,   sizeof(name));
+            j_str(j, "sound", sid,    sizeof(sid));
+            j_int(j, "anim",   &anim);
+            j_int(j, "cdmode", &cdmode);
+
+            uint8_t u[4];
+            if (!hex_to_uid(uidhex, u)) continue;
+
+            // An unknown sound id means the audio pack isn't installed yet.
+            // Fall back to random rather than dropping the band: the name and
+            // the countdown mode are still worth keeping, and the sound can be
+            // set again once the pack lands.
+            char path[64];
+            if (!sound_path_for_id(sid, path, sizeof(path))) sid[0] = '\0';
+            if (anim < 0 || anim >= ANIM_COUNT) anim = ANIM_CELEBRATE;
+
+            bands_sanitize_name(name);
+            if (store_save(u, sid, (uint8_t)anim) != ESP_OK) continue;
+            if (name[0]) bands_set_name(uidhex, name);
+            countdown_set_mode(uidhex, cdmode);
+            n_band++;
+        }
+    }
+
+    cJSON_Delete(root);
+
+    // The trip date may have moved, so drop every "already greeted today" mark
+    // - otherwise the new count stays hidden until tomorrow, which looks
+    // exactly like the import not having worked.
+    countdown_reset_all();
+
+    ESP_LOGI(TAG, "import: %d occasion(s), %d band(s)", n_occ, n_band);
+
+    cJSON *res = cJSON_CreateObject();
+    cJSON_AddBoolToObject(res, "ok", true);
+    cJSON_AddNumberToObject(res, "occasions", n_occ);
+    cJSON_AddNumberToObject(res, "bands", n_band);
+    return send_json(req, res);
+}
+
 // GET /api/bands -> { bands:[...], sounds:[...], last:{...} }
 static esp_err_t api_bands_get(httpd_req_t *req)
 {
@@ -931,10 +1204,17 @@ static esp_err_t api_scan(httpd_req_t *req)
     char last[9];
     if (!bands_last_scan(last, sizeof(last))) last[0] = '\0';
 
-    char body[96];
-    int n = snprintf(body, sizeof(body), "{\"n\":%u,\"uid\":\"%s\",\"busy\":%s}",
+    // `help` rides the poll the page already makes rather than getting its own
+    // endpoint: the notice has to appear on a page that's already open, and a
+    // second poll would double the traffic to say "still nothing" almost every
+    // time. It is plain text the page renders - deliberately not a URL for the
+    // page to follow, because it describes a condition rather than an action.
+    char body[320];
+    int n = snprintf(body, sizeof(body),
+                     "{\"n\":%u,\"uid\":\"%s\",\"busy\":%s,\"help\":\"%s\"}",
                      (unsigned)bands_scan_seq(), last,
-                     app_moment_busy() ? "true" : "false");
+                     app_moment_busy() ? "true" : "false",
+                     needhelp_active() ? needhelp_text() : "");
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -1029,13 +1309,30 @@ void portal_start(bool ap_mode)
 
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.lru_purge_enable = true;
-    hc.max_uri_handlers = 16;          // page/assets/config/api + webota, w/ headroom
+    // Not headroom for long: this hit its ceiling the moment export/import
+    // arrived, and httpd_register_uri_handler returns an error rather than
+    // failing loudly - so the LAST handler registered simply wasn't there, and
+    // the symptom was a 404 mid-upload that read like the device crashing.
+    // Registration failures are checked below now, so a full table says so.
+    hc.max_uri_handlers = 24;          // page/assets/config/api + webota
     if (ap_mode) hc.uri_match_fn = httpd_uri_match_wildcard;
     if (httpd_start(&s_httpd, &hc) != ESP_OK) {
         ESP_LOGE(TAG, "HTTP server failed to start");
         return;
     }
 
+    // Register through this, never directly: a full handler table is reported
+    // as a return value, and dropping it means the route just isn't there. That
+    // fails as a 404 at the moment somebody uses the feature, nowhere near the
+    // boot log that could have explained it.
+    #define REG(u) do { \
+        esp_err_t _r = httpd_register_uri_handler(s_httpd, (u)); \
+        if (_r != ESP_OK) ESP_LOGE(TAG, "URI %s NOT registered (%s) - raise max_uri_handlers", \
+                                   (u)->uri, esp_err_to_name(_r)); \
+    } while (0)
+
+    httpd_uri_t api_exp   = { .uri = "/api/export",           .method = HTTP_GET,  .handler = api_export_get };
+    httpd_uri_t api_imp   = { .uri = "/api/import",           .method = HTTP_POST, .handler = api_import_post };
     httpd_uri_t root    = { .uri = "/",            .method = HTTP_GET,  .handler = root_get };
     httpd_uri_t favicon = { .uri = "/favicon.ico", .method = HTTP_GET,  .handler = favicon_get };
     httpd_uri_t logo    = { .uri = "/logo.png",    .method = HTTP_GET,  .handler = logo_get };
@@ -1051,21 +1348,23 @@ void portal_start(bool ap_mode)
     httpd_uri_t api_rep   = { .uri = "/api/countdown/replay", .method = HTTP_POST, .handler = api_cd_replay };
     httpd_uri_t api_scan_ = { .uri = "/api/scan",             .method = HTTP_GET,  .handler = api_scan };
     httpd_uri_t api_rbt   = { .uri = "/api/reboot",           .method = HTTP_POST, .handler = api_reboot };
-    httpd_register_uri_handler(s_httpd, &root);
-    httpd_register_uri_handler(s_httpd, &favicon);
-    httpd_register_uri_handler(s_httpd, &logo);
-    httpd_register_uri_handler(s_httpd, &save);
-    httpd_register_uri_handler(s_httpd, &forget);
-    httpd_register_uri_handler(s_httpd, &factory);
-    httpd_register_uri_handler(s_httpd, &api_bands);
-    httpd_register_uri_handler(s_httpd, &api_save);
-    httpd_register_uri_handler(s_httpd, &api_del);
-    httpd_register_uri_handler(s_httpd, &api_play);
-    httpd_register_uri_handler(s_httpd, &api_snd);
-    httpd_register_uri_handler(s_httpd, &api_snddel);
-    httpd_register_uri_handler(s_httpd, &api_rep);
-    httpd_register_uri_handler(s_httpd, &api_scan_);
-    httpd_register_uri_handler(s_httpd, &api_rbt);
+    REG(&root);
+    REG(&favicon);
+    REG(&logo);
+    REG(&save);
+    REG(&forget);
+    REG(&factory);
+    REG(&api_bands);
+    REG(&api_save);
+    REG(&api_del);
+    REG(&api_play);
+    REG(&api_snd);
+    REG(&api_snddel);
+    REG(&api_rep);
+    REG(&api_scan_);
+    REG(&api_rbt);
+    REG(&api_exp);
+    REG(&api_imp);
 
     // Upload routes always exist; the gate decides if they do anything. In setup
     // mode we enable them; in normal mode they stay locked (403) until the
