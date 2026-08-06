@@ -22,3 +22,10 @@ release/
 Thumbs.db
 .DS_Store
 ~$*
+
+# --- signing key material: NEVER in git ---------------------------------
+# History is permanent and the public mirror is a hand-run file copy. A key
+# that lands in a commit can only be rotated, never withdrawn.
+*.pem
+*.key
+signing/
