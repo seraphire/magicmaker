@@ -265,9 +265,18 @@ future sync or the switch isn't worth having.
 - **#21 Compound: "two weeks and three days"** — better phrasing *and* it
   retires `d8`–`d13`. The phrasing is the reason; the six files are a rounding
   error.
-- **#14 "Sometimes" mode** alongside Daily/Always/Off
+- **#50 Pressure, not gates** — replaces the daily mark, the taper and the
+  cheeky streak with one mechanism: anything that *didn't* play gets more
+  likely on the next tap, and resets when it fires. Written up in full in
+  [sound-selection.md](sound-selection.md).
+  The bug that forced it: at 167 days out `is_speaking_day` falls to
+  fortnightly, `167 % 14 = 13`, so the countdown could not be demonstrated at
+  all — invisible thirteen days in fourteen, and most invisible when the trip
+  is furthest away. A hard gate has no middle setting.
+  **Absorbs #14 and #16**, which become a `base` and a per-band cue chance.
+  Ships with `countdown why`, without which a quiet device and a broken one
+  are indistinguishable.
 - **#15 Cheeky as a parenthetical** — play the band's own sound after it
-- **#16 Per-band chance** of playing something other than its own sound
 
 ## Interface and odds and ends
 
